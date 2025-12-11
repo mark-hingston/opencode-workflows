@@ -295,6 +295,106 @@ Steps can declare dependencies using `after`:
 
 Steps at the same dependency level run in parallel.
 
+## Agent Orchestration
+
+One of the most powerful use cases is orchestrating multiple AI agents in a deterministic pipeline. This lets you build reliable, repeatable AI workflows where specialized agents collaborate on complex tasks.
+
+### Multi-Agent Code Review
+
+This example chains multiple specialized agents to review code from different perspectives, then synthesizes their findings:
+
+```json
+{
+  "id": "code-review",
+  "name": "Multi-Agent Code Review",
+  "description": "Parallel expert review with synthesis",
+  "inputs": {
+    "file": {
+      "type": "string",
+      "description": "File path to review",
+      "required": true
+    }
+  },
+  "steps": [
+    {
+      "id": "read_file",
+      "type": "tool",
+      "tool": "read",
+      "args": { "filePath": "{{inputs.file}}" }
+    },
+    {
+      "id": "security_review",
+      "type": "agent",
+      "system": "You are a security expert. Identify vulnerabilities, injection risks, and auth issues. Be concise.",
+      "prompt": "Review this code for security issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "after": ["read_file"]
+    },
+    {
+      "id": "perf_review",
+      "type": "agent",
+      "system": "You are a performance engineer. Identify bottlenecks, memory leaks, and optimization opportunities. Be concise.",
+      "prompt": "Review this code for performance issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "after": ["read_file"]
+    },
+    {
+      "id": "quality_review",
+      "type": "agent",
+      "system": "You are a senior developer. Review for readability, maintainability, and best practices. Be concise.",
+      "prompt": "Review this code for quality issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "after": ["read_file"]
+    },
+    {
+      "id": "synthesize",
+      "type": "agent",
+      "system": "You are a tech lead. Synthesize code reviews into a prioritized action list grouped by severity.",
+      "prompt": "Combine these reviews into a single report:\n\n## Security\n{{steps.security_review.response}}\n\n## Performance\n{{steps.perf_review.response}}\n\n## Quality\n{{steps.quality_review.response}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "after": ["security_review", "perf_review", "quality_review"]
+    },
+    {
+      "id": "approve_fixes",
+      "type": "suspend",
+      "message": "Review complete:\n\n{{steps.synthesize.response}}\n\nResume to generate fixes.",
+      "after": ["synthesize"]
+    },
+    {
+      "id": "generate_fixes",
+      "type": "agent",
+      "system": "You are a code fixer. Output ONLY the corrected code, no explanations.",
+      "prompt": "Fix the critical and high severity issues:\n\nOriginal:\n{{steps.read_file.result}}\n\nIssues:\n{{steps.synthesize.response}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "after": ["approve_fixes"]
+    }
+  ]
+}
+```
+
+Run it with:
+```
+/workflow run code-review file=src/api/auth.ts
+```
+
+### Orchestration Patterns
+
+| Pattern | Description | Example |
+|---------|-------------|---------|
+| **Sequential Chain** | Each agent uses the previous agent's output | Planner → Executor → Reviewer |
+| **Parallel Experts** | Multiple agents analyze independently, then synthesize | Security + Performance + Quality → Summary |
+| **Tool-Augmented** | Agents use tools to read files, search code, make API calls | Read file → Analyze → Write fix |
+| **Human-in-the-Loop** | `suspend` steps for approval between agent actions | Generate → Approve → Apply |
+| **Conditional Routing** | Use `condition` to skip agents based on results | Skip deploy agent if tests failed |
+
+### Why Use Workflows for Agent Orchestration?
+
+- **Deterministic**: Unlike free-form agent conversations, workflows execute the same steps every time
+- **Auditable**: Each step's output is captured and can be reviewed
+- **Resumable**: Workflows persist to disk and survive restarts
+- **Composable**: Build complex pipelines from simple, focused agents
+- **Controllable**: Human approval gates prevent unwanted actions
+
 ## License
 
 MIT

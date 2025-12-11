@@ -1,0 +1,82 @@
+{
+  "id": "code-review",
+  "name": "Multi-Agent Code Review",
+  "description": "Parallel expert code review with synthesis and optional auto-fix",
+  "version": "1.0.0",
+  "tags": ["review", "agents", "quality"],
+  "inputs": {
+    "file": {
+      "type": "string",
+      "description": "File path to review",
+      "required": true
+    }
+  },
+  "steps": [
+    {
+      "id": "read_file",
+      "type": "tool",
+      "description": "Read the source file",
+      "tool": "read",
+      "args": {
+        "filePath": "{{inputs.file}}"
+      }
+    },
+    {
+      "id": "security_review",
+      "type": "agent",
+      "description": "Security vulnerability analysis",
+      "system": "You are a security expert. Identify vulnerabilities, injection risks, authentication issues, and data exposure. Be concise and specific.",
+      "prompt": "Review this code for security issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "maxTokens": 1000,
+      "after": ["read_file"]
+    },
+    {
+      "id": "perf_review",
+      "type": "agent",
+      "description": "Performance analysis",
+      "system": "You are a performance engineer. Identify bottlenecks, memory leaks, N+1 queries, and optimization opportunities. Be concise and specific.",
+      "prompt": "Review this code for performance issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "maxTokens": 1000,
+      "after": ["read_file"]
+    },
+    {
+      "id": "quality_review",
+      "type": "agent",
+      "description": "Code quality analysis",
+      "system": "You are a senior developer. Review for readability, maintainability, error handling, and best practices. Be concise and specific.",
+      "prompt": "Review this code for quality issues:\n\n{{steps.read_file.result}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "maxTokens": 1000,
+      "after": ["read_file"]
+    },
+    {
+      "id": "synthesize",
+      "type": "agent",
+      "description": "Synthesize reviews into prioritized action items",
+      "system": "You are a tech lead. Synthesize multiple code reviews into a single prioritized action list. Group issues by severity: critical, high, medium, low. Be actionable.",
+      "prompt": "Combine these code reviews into a prioritized report:\n\n## Security Review\n{{steps.security_review.response}}\n\n## Performance Review\n{{steps.perf_review.response}}\n\n## Quality Review\n{{steps.quality_review.response}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "maxTokens": 2000,
+      "after": ["security_review", "perf_review", "quality_review"]
+    },
+    {
+      "id": "approve_fixes",
+      "type": "suspend",
+      "description": "Human approval gate before generating fixes",
+      "message": "Code review complete for {{inputs.file}}:\n\n{{steps.synthesize.response}}\n\nResume to generate auto-fix suggestions.",
+      "after": ["synthesize"]
+    },
+    {
+      "id": "generate_fixes",
+      "type": "agent",
+      "description": "Generate fixed code",
+      "system": "You are a code fixer. Apply the requested fixes to the code. Output ONLY the complete corrected code with no explanations or markdown.",
+      "prompt": "Fix the critical and high severity issues in this code:\n\nOriginal code:\n{{steps.read_file.result}}\n\nIssues to fix:\n{{steps.synthesize.response}}",
+      "model": "anthropic:claude-sonnet-4-20250514",
+      "maxTokens": 4000,
+      "after": ["approve_fixes"]
+    }
+  ]
+}
