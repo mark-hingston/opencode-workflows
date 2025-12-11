@@ -123,16 +123,40 @@ Invoke OpenCode tools:
 ```
 
 ### Agent Step
-Prompt an LLM:
+Invoke a named OpenCode agent or prompt an LLM directly:
+
+**Named Agent (recommended):**
+```json
+{
+  "id": "security-review",
+  "type": "agent",
+  "agent": "security-reviewer",
+  "prompt": "Review this code for security issues:\n\n{{steps.read_file.result}}",
+  "maxTokens": 1000
+}
+```
+
+This invokes a pre-defined OpenCode agent by name. The agent's system prompt, model, and other settings are configured in OpenCode's agent definitions.
+
+**Inline LLM (fallback):**
 ```json
 {
   "id": "generate-changelog",
   "type": "agent",
   "prompt": "Generate a changelog for version {{inputs.version}}",
-  "model": "gpt-4",
+  "system": "You are a technical writer.",
   "maxTokens": 1000
 }
 ```
+
+This makes a direct LLM call with an optional system prompt. Note that `model` selection may not be supported by the plugin system - the configured default model will be used.
+
+| Option | Type | Description |
+|--------|------|-------------|
+| `agent` | `string` | Name of a pre-defined OpenCode agent to invoke |
+| `prompt` | `string` | The prompt to send (required, supports interpolation) |
+| `system` | `string` | System prompt for inline LLM calls (ignored if `agent` is specified) |
+| `maxTokens` | `number` | Maximum tokens for response |
 
 ### Suspend Step
 Pause for human input:
@@ -381,33 +405,29 @@ This example chains multiple specialized agents to review code from different pe
     {
       "id": "security_review",
       "type": "agent",
-      "system": "You are a security expert. Identify vulnerabilities, injection risks, and auth issues. Be concise.",
+      "agent": "security-reviewer",
       "prompt": "Review this code for security issues:\n\n{{steps.read_file.result}}",
-      "model": "anthropic:claude-sonnet-4-20250514",
       "after": ["read_file"]
     },
     {
       "id": "perf_review",
       "type": "agent",
-      "system": "You are a performance engineer. Identify bottlenecks, memory leaks, and optimization opportunities. Be concise.",
+      "agent": "performance-reviewer",
       "prompt": "Review this code for performance issues:\n\n{{steps.read_file.result}}",
-      "model": "anthropic:claude-sonnet-4-20250514",
       "after": ["read_file"]
     },
     {
       "id": "quality_review",
       "type": "agent",
-      "system": "You are a senior developer. Review for readability, maintainability, and best practices. Be concise.",
+      "agent": "quality-reviewer",
       "prompt": "Review this code for quality issues:\n\n{{steps.read_file.result}}",
-      "model": "anthropic:claude-sonnet-4-20250514",
       "after": ["read_file"]
     },
     {
       "id": "synthesize",
       "type": "agent",
-      "system": "You are a tech lead. Synthesize code reviews into a prioritized action list grouped by severity.",
+      "agent": "tech-lead",
       "prompt": "Combine these reviews into a single report:\n\n## Security\n{{steps.security_review.response}}\n\n## Performance\n{{steps.perf_review.response}}\n\n## Quality\n{{steps.quality_review.response}}",
-      "model": "anthropic:claude-sonnet-4-20250514",
       "after": ["security_review", "perf_review", "quality_review"]
     },
     {
@@ -419,14 +439,15 @@ This example chains multiple specialized agents to review code from different pe
     {
       "id": "generate_fixes",
       "type": "agent",
-      "system": "You are a code fixer. Output ONLY the corrected code, no explanations.",
+      "agent": "code-fixer",
       "prompt": "Fix the critical and high severity issues:\n\nOriginal:\n{{steps.read_file.result}}\n\nIssues:\n{{steps.synthesize.response}}",
-      "model": "anthropic:claude-sonnet-4-20250514",
       "after": ["approve_fixes"]
     }
   ]
 }
 ```
+
+> **Note**: This example assumes you have agents named `security-reviewer`, `performance-reviewer`, `quality-reviewer`, `tech-lead`, and `code-fixer` configured in OpenCode. Alternatively, you can use inline LLM calls with `system` prompts instead of named agents.
 
 Run it with:
 ```

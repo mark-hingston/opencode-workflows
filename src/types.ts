@@ -91,14 +91,16 @@ export interface ToolStepDefinition extends BaseStepDefinition {
   args?: JsonObject;
 }
 
-/** LLM agent prompt step */
+/** LLM agent prompt step - supports both named agent references and inline LLM calls */
 export interface AgentStepDefinition extends BaseStepDefinition {
   type: "agent";
+  /** Prompt to send to the agent/LLM */
   prompt: string;
-  model?: string;
-  /** System prompt override */
+  /** Name of a pre-defined opencode agent to invoke (mutually exclusive with inline config) */
+  agent?: string;
+  /** System prompt for inline LLM calls (ignored if agent is specified) */
   system?: string;
-  /** Max tokens for response */
+  /** Max tokens for response (applies to both modes) */
   maxTokens?: number;
 }
 
@@ -285,9 +287,14 @@ export interface OpencodeClient {
   tools: Record<string, {
     execute: (args: JsonObject) => Promise<JsonValue>;
   }>;
+  /** Named agents available in opencode */
+  agents?: Record<string, {
+    /** Invoke the agent with a prompt */
+    invoke: (prompt: string, options?: { maxTokens?: number }) => Promise<{ content: string }>;
+  }>;
+  /** Direct LLM access for inline agent calls (uses configured default model) */
   llm: {
     chat: (options: {
-      model?: string;
       messages: Array<{ role: string; content: string }>;
       maxTokens?: number;
     }) => Promise<{ content: string }>;
@@ -365,8 +372,11 @@ export const ToolStepSchema = BaseStepSchema.extend({
 export const AgentStepSchema = BaseStepSchema.extend({
   type: z.literal("agent"),
   prompt: z.string().min(1),
-  model: z.string().optional(),
+  /** Name of a pre-defined opencode agent to invoke */
+  agent: z.string().optional(),
+  /** System prompt for inline LLM calls (ignored if agent is specified) */
   system: z.string().optional(),
+  /** Max tokens for response */
   maxTokens: z.number().positive().optional(),
 });
 

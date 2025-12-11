@@ -341,12 +341,16 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
 // =============================================================================
 
 /**
- * Creates a Mastra step that prompts an LLM
+ * Creates a Mastra step that invokes an agent or prompts an LLM.
+ * 
+ * Supports two modes:
+ * 1. Named agent reference: Uses `def.agent` to invoke a pre-defined opencode agent
+ * 2. Inline LLM call: Uses `def.system` for direct LLM chat (legacy/fallback)
  */
 export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient) {
   return createStep({
     id: def.id,
-    description: def.description || "LLM Agent prompt",
+    description: def.description || (def.agent ? `Agent: ${def.agent}` : "LLM prompt"),
     inputSchema: StepInputSchema,
     outputSchema: z.object({
       response: z.string(),
@@ -381,9 +385,26 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
 
       // Interpolate prompt
       const prompt = interpolate(def.prompt, ctx);
-      
-      // Log prompt to TUI
-      client.app.log(`Agent prompt: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`, "info");
+
+      // Mode 1: Named agent reference
+      if (def.agent) {
+        if (!client.agents) {
+          throw new Error("No agents available on the opencode client. Ensure agents are configured.");
+        }
+        
+        const agent = client.agents[def.agent];
+        if (!agent) {
+          const availableAgents = Object.keys(client.agents).join(", ") || "(none)";
+          throw new Error(`Agent '${def.agent}' not found. Available agents: ${availableAgents}`);
+        }
+
+        client.app.log(`Invoking agent: ${def.agent}`, "info");
+        const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
+        return { response: response.content };
+      }
+
+      // Mode 2: Inline LLM call (legacy/fallback)
+      client.app.log(`LLM prompt: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`, "info");
 
       const messages: Array<{ role: string; content: string }> = [];
 
@@ -397,7 +418,6 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
       messages.push({ role: "user", content: prompt });
 
       const response = await client.llm.chat({
-        model: def.model,
         messages,
         maxTokens: def.maxTokens,
       });

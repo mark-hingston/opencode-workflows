@@ -62,7 +62,6 @@ function createClientAdapter(client: PluginInput["client"]): OpencodeClient {
         
         const response = await llmClient.llm.chat({
           messages: opts.messages,
-          model: opts.model,
           maxTokens: opts.maxTokens,
         });
         

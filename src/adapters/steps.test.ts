@@ -730,7 +730,97 @@ describe("Step Adapters", () => {
       });
     });
 
-    describe("agent execution", () => {
+    describe("named agent execution", () => {
+      it("should invoke named agent when agent property is specified", async () => {
+        const mockInvoke = vi.fn().mockResolvedValue({ content: "Agent response" });
+        mockClient.agents = {
+          "code-reviewer": { invoke: mockInvoke },
+        };
+
+        const step = createAgentStep(
+          { id: "review", type: "agent", agent: "code-reviewer", prompt: "Review this code" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ response: "Agent response" });
+        expect(mockInvoke).toHaveBeenCalledWith("Review this code", { maxTokens: undefined });
+        expect(mockClient.llm.chat).not.toHaveBeenCalled();
+      });
+
+      it("should pass maxTokens to named agent", async () => {
+        const mockInvoke = vi.fn().mockResolvedValue({ content: "Response" });
+        mockClient.agents = {
+          summarizer: { invoke: mockInvoke },
+        };
+
+        const step = createAgentStep(
+          { id: "summary", type: "agent", agent: "summarizer", prompt: "Summarize", maxTokens: 500 },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockInvoke).toHaveBeenCalledWith("Summarize", { maxTokens: 500 });
+      });
+
+      it("should interpolate prompt for named agent", async () => {
+        const mockInvoke = vi.fn().mockResolvedValue({ content: "Response" });
+        mockClient.agents = {
+          reviewer: { invoke: mockInvoke },
+        };
+
+        const step = createAgentStep(
+          { id: "review", type: "agent", agent: "reviewer", prompt: "Review: {{inputs.code}}" },
+          mockClient
+        );
+
+        await step.execute({
+          inputData: { inputs: { code: "const x = 1" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(mockInvoke).toHaveBeenCalledWith("Review: const x = 1", { maxTokens: undefined });
+      });
+
+      it("should throw error when agent is not found", async () => {
+        mockClient.agents = {
+          "other-agent": { invoke: vi.fn() },
+        };
+
+        const step = createAgentStep(
+          { id: "review", type: "agent", agent: "unknown-agent", prompt: "Test" },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("Agent 'unknown-agent' not found. Available agents: other-agent");
+      });
+
+      it("should throw error when no agents are available", async () => {
+        // mockClient.agents is undefined by default
+
+        const step = createAgentStep(
+          { id: "review", type: "agent", agent: "any-agent", prompt: "Test" },
+          mockClient
+        );
+
+        await expect(
+          step.execute({
+            inputData: { inputs: {}, steps: {} },
+          } as unknown as Parameters<typeof step.execute>[0])
+        ).rejects.toThrow("No agents available on the opencode client");
+      });
+    });
+
+    describe("inline LLM execution", () => {
       it("should call LLM with prompt and return response", async () => {
         const step = createAgentStep(
           { id: "agent", type: "agent", prompt: "Summarize this" },
@@ -743,7 +833,6 @@ describe("Step Adapters", () => {
 
         expect(result).toEqual({ response: "LLM response" });
         expect(mockClient.llm.chat).toHaveBeenCalledWith({
-          model: undefined,
           messages: [{ role: "user", content: "Summarize this" }],
           maxTokens: undefined,
         });
@@ -793,13 +882,12 @@ describe("Step Adapters", () => {
         );
       });
 
-      it("should pass model and maxTokens config", async () => {
+      it("should pass maxTokens config", async () => {
         const step = createAgentStep(
           {
             id: "agent",
             type: "agent",
             prompt: "Hello",
-            model: "gpt-4",
             maxTokens: 500,
           },
           mockClient
@@ -810,7 +898,6 @@ describe("Step Adapters", () => {
         } as unknown as Parameters<typeof step.execute>[0]);
 
         expect(mockClient.llm.chat).toHaveBeenCalledWith({
-          model: "gpt-4",
           messages: [{ role: "user", content: "Hello" }],
           maxTokens: 500,
         });
@@ -850,6 +937,23 @@ describe("Step Adapters", () => {
 
         expect(result).toEqual({ response: "", skipped: true });
         expect(mockClient.llm.chat).not.toHaveBeenCalled();
+      });
+
+      it("should skip named agent when condition is false", async () => {
+        const mockInvoke = vi.fn();
+        mockClient.agents = { reviewer: { invoke: mockInvoke } };
+
+        const step = createAgentStep(
+          { id: "agent", type: "agent", agent: "reviewer", prompt: "Review", condition: "{{inputs.run}}" },
+          mockClient
+        );
+
+        const result = await step.execute({
+          inputData: { inputs: { run: "false" }, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        expect(result).toEqual({ response: "", skipped: true });
+        expect(mockInvoke).not.toHaveBeenCalled();
       });
     });
   });
