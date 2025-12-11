@@ -11,6 +11,8 @@ vi.mock("@mastra/libsql", () => ({
     client: {
       execute: vi.fn().mockResolvedValue({ rows: [] }),
     },
+    // Extended method added by ExtendedLibSQLStore
+    executeSQL: vi.fn().mockResolvedValue({ rows: [] }),
   })),
 }));
 
@@ -142,7 +144,7 @@ describe("WorkflowStorage", () => {
   });
 
   describe("updateRun", () => {
-    it("should update a run by delete and re-insert", async () => {
+    it("should update a run using SQL UPDATE", async () => {
       const run: WorkflowRun = {
         runId: "test-run-update",
         workflowId: "test-workflow",
@@ -152,9 +154,8 @@ describe("WorkflowStorage", () => {
         startedAt: new Date(),
       };
 
-      await storage.updateRun(run);
-      // updateRun calls deleteRun then saveRun
-      expect(mockLogger.debug).toHaveBeenCalledWith("Saved run: test-run-update");
+      // updateRun now uses executeSQL with UPDATE query
+      await expect(storage.updateRun(run)).resolves.not.toThrow();
     });
   });
 

@@ -15,6 +15,28 @@
 
 import type { JsonValue } from "../types.js";
 
+// =============================================================================
+// Constants
+// =============================================================================
+
+/** Pattern for matching interpolation expressions */
+const INTERPOLATION_PATTERN = /\{\{([^}]+)\}\}/g;
+
+/** Keys that could enable prototype pollution attacks */
+const DANGEROUS_KEYS = new Set(["__proto__", "constructor", "prototype"]);
+
+/** Prefixes for different expression types */
+const EXPR_PREFIX = {
+  INPUTS: "inputs.",
+  STEPS: "steps.",
+  ENV: "env.",
+  RUN: "run.",
+} as const;
+
+// =============================================================================
+// Types
+// =============================================================================
+
 /**
  * Run metadata available in interpolation context
  */
@@ -36,13 +58,39 @@ export interface InterpolationContext {
 }
 
 /**
- * Get a nested value from an object using dot notation
+ * Result from parsing an expression
+ */
+interface ParsedExpressionResult {
+  found: boolean;
+  value: JsonValue | undefined;
+}
+
+// =============================================================================
+// Core Functions
+// =============================================================================
+
+/**
+ * Check if a key is potentially dangerous for prototype pollution
+ */
+function isDangerousKey(key: string): boolean {
+  return DANGEROUS_KEYS.has(key);
+}
+
+/**
+ * Get a nested value from an object using dot notation.
+ * Includes protection against prototype pollution attacks.
  */
 export function getNestedValue(obj: JsonValue, path: string): JsonValue | undefined {
   const parts = path.split(".");
   let current: JsonValue | undefined = obj;
 
   for (const part of parts) {
+    // Prototype pollution protection
+    if (isDangerousKey(part)) {
+      console.warn(`Blocked access to dangerous key: ${part}`);
+      return undefined;
+    }
+
     if (current === null || current === undefined) {
       return undefined;
     }
@@ -56,48 +104,43 @@ export function getNestedValue(obj: JsonValue, path: string): JsonValue | undefi
 }
 
 /**
- * Interpolate {{expression}} placeholders in a string
+ * Parse an expression and resolve its value from context.
+ * This is the shared logic used by both interpolate() and interpolateValue().
  */
-export function interpolate(template: string, ctx: InterpolationContext): string {
-  // Match {{expression}} patterns
-  const pattern = /\{\{([^}]+)\}\}/g;
+function parseExpression(expression: string, ctx: InterpolationContext): ParsedExpressionResult {
+  const trimmed = expression.trim();
 
-  return template.replace(pattern, (match, expression: string) => {
-    const trimmed = expression.trim();
+  if (trimmed.startsWith(EXPR_PREFIX.INPUTS)) {
+    const path = trimmed.slice(EXPR_PREFIX.INPUTS.length);
+    return { found: true, value: getNestedValue(ctx.inputs, path) };
+  }
 
-    // Parse the expression
-    if (trimmed.startsWith("inputs.")) {
-      const path = trimmed.slice("inputs.".length);
-      const value = getNestedValue(ctx.inputs, path);
-      return formatValue(value);
+  if (trimmed.startsWith(EXPR_PREFIX.STEPS)) {
+    const path = trimmed.slice(EXPR_PREFIX.STEPS.length);
+    return { found: true, value: getNestedValue(ctx.steps, path) };
+  }
+
+  if (trimmed.startsWith(EXPR_PREFIX.ENV)) {
+    const key = trimmed.slice(EXPR_PREFIX.ENV.length);
+    // Prototype pollution check for env keys
+    if (isDangerousKey(key)) {
+      console.warn(`Blocked access to dangerous env key: ${key}`);
+      return { found: true, value: undefined };
     }
+    const value = ctx.env ? ctx.env[key] : process.env[key];
+    return { found: true, value };
+  }
 
-    if (trimmed.startsWith("steps.")) {
-      const path = trimmed.slice("steps.".length);
-      const value = getNestedValue(ctx.steps, path);
-      return formatValue(value);
+  if (trimmed.startsWith(EXPR_PREFIX.RUN)) {
+    const key = trimmed.slice(EXPR_PREFIX.RUN.length);
+    if (ctx.run && key in ctx.run) {
+      return { found: true, value: ctx.run[key as keyof RunContext] };
     }
+    return { found: true, value: undefined };
+  }
 
-    if (trimmed.startsWith("env.")) {
-      const key = trimmed.slice("env.".length);
-      // Use ctx.env if provided, otherwise fall back to process.env
-      const value = ctx.env ? ctx.env[key] : process.env[key];
-      return formatValue(value);
-    }
-
-    if (trimmed.startsWith("run.")) {
-      const key = trimmed.slice("run.".length);
-      if (ctx.run) {
-        const value = ctx.run[key as keyof RunContext];
-        return formatValue(value);
-      }
-      return "";
-    }
-
-    // Unknown expression, return as-is
-    console.warn(`Unknown interpolation expression: ${trimmed}`);
-    return match;
-  });
+  // Unknown expression type
+  return { found: false, value: undefined };
 }
 
 /**
@@ -124,24 +167,44 @@ function formatValue(value: JsonValue | undefined): string {
 }
 
 /**
- * Check if a string contains interpolation expressions
+ * Interpolate {{expression}} placeholders in a string
  */
-export function hasInterpolation(str: string): boolean {
-  return /\{\{[^}]+\}\}/.test(str);
+export function interpolate(template: string, ctx: InterpolationContext): string {
+  // Use a new RegExp instance to avoid shared lastIndex issues
+  const pattern = new RegExp(INTERPOLATION_PATTERN.source, "g");
+
+  return template.replace(pattern, (match, expression: string) => {
+    const result = parseExpression(expression, ctx);
+    
+    if (!result.found) {
+      console.warn(`Unknown interpolation expression: ${expression.trim()}`);
+      return match;
+    }
+    
+    return formatValue(result.value);
+  });
 }
 
 /**
- * Extract all variable references from a template
+ * Check if a string contains interpolation expressions
+ */
+export function hasInterpolation(str: string): boolean {
+  // Create a new RegExp instance to avoid lastIndex issues with global flag
+  const pattern = new RegExp(INTERPOLATION_PATTERN.source);
+  return pattern.test(str);
+}
+
+/**
+ * Extract all variable references from a template.
+ * Uses matchAll for cleaner iteration.
  */
 export function extractVariables(template: string): string[] {
-  const pattern = /\{\{([^}]+)\}\}/g;
+  // Create a new RegExp to reset lastIndex
+  const pattern = new RegExp(INTERPOLATION_PATTERN.source, "g");
   const variables: string[] = [];
-  let match: RegExpExecArray | null;
-
-  match = pattern.exec(template);
-  while (match !== null) {
+  
+  for (const match of template.matchAll(pattern)) {
     variables.push(match[1].trim());
-    match = pattern.exec(template);
   }
 
   return variables;
@@ -158,28 +221,9 @@ export function validateInterpolation(
   const missing: string[] = [];
 
   for (const variable of variables) {
-    if (variable.startsWith("inputs.")) {
-      const path = variable.slice("inputs.".length);
-      if (getNestedValue(ctx.inputs, path) === undefined) {
-        missing.push(variable);
-      }
-    } else if (variable.startsWith("steps.")) {
-      const path = variable.slice("steps.".length);
-      if (getNestedValue(ctx.steps, path) === undefined) {
-        missing.push(variable);
-      }
-    } else if (variable.startsWith("env.")) {
-      const key = variable.slice("env.".length);
-      const value = ctx.env ? ctx.env[key] : process.env[key];
-      if (value === undefined) {
-        missing.push(variable);
-      }
-    } else if (variable.startsWith("run.")) {
-      const key = variable.slice("run.".length);
-      if (!ctx.run || !(key in ctx.run)) {
-        missing.push(variable);
-      }
-    } else {
+    const result = parseExpression(variable, ctx);
+    
+    if (!result.found || result.value === undefined) {
       missing.push(variable);
     }
   }
@@ -204,33 +248,11 @@ export function interpolateValue(template: string, ctx: InterpolationContext): J
   // Check if the template is EXACTLY a single variable reference (e.g. "{{inputs.count}}")
   const exactMatch = /^\{\{([^}]+)\}\}$/.exec(trimmed);
   if (exactMatch) {
-    const expression = exactMatch[1].trim();
+    const expression = exactMatch[1];
+    const result = parseExpression(expression, ctx);
     
-    if (expression.startsWith("inputs.")) {
-      const path = expression.slice("inputs.".length);
-      const value = getNestedValue(ctx.inputs, path);
-      return value !== undefined ? value : null;
-    }
-    
-    if (expression.startsWith("steps.")) {
-      const path = expression.slice("steps.".length);
-      const value = getNestedValue(ctx.steps, path);
-      return value !== undefined ? value : null;
-    }
-    
-    if (expression.startsWith("env.")) {
-      const key = expression.slice("env.".length);
-      const value = ctx.env ? ctx.env[key] : process.env[key];
-      return value !== undefined ? value : null;
-    }
-    
-    if (expression.startsWith("run.")) {
-      const key = expression.slice("run.".length);
-      if (ctx.run) {
-        const value = ctx.run[key as keyof RunContext];
-        return value !== undefined ? value : null;
-      }
-      return null;
+    if (result.found) {
+      return result.value !== undefined ? result.value : null;
     }
   }
 

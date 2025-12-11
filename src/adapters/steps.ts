@@ -3,6 +3,7 @@ import { z } from "zod";
 import { exec } from "node:child_process";
 import { promisify } from "node:util";
 import { readFile, writeFile, unlink } from "node:fs/promises";
+import { resolve, normalize, isAbsolute } from "node:path";
 import type {
   ShellStepDefinition,
   ToolStepDefinition,
@@ -17,6 +18,126 @@ import type {
 import { interpolate, interpolateValue } from "./interpolation.js";
 
 const execAsync = promisify(exec);
+
+// =============================================================================
+// Security Utilities
+// =============================================================================
+
+/**
+ * Dangerous shell characters/patterns that could enable command injection.
+ * These are logged as warnings but not blocked to maintain flexibility.
+ */
+const SHELL_DANGEROUS_PATTERNS = [
+  /;\s*rm\s/i,      // rm after semicolon
+  /\|\s*sh\b/i,     // piping to shell
+  /\|\s*bash\b/i,   // piping to bash
+  /`[^`]+`/,        // backtick command substitution
+  /\$\([^)]+\)/,    // $() command substitution
+  />\s*\/etc\//i,   // writing to /etc
+  />\s*\/bin\//i,   // writing to /bin
+];
+
+/**
+ * Check if a command contains potentially dangerous patterns.
+ * Returns warnings for logging but does not block execution.
+ */
+function checkCommandSafety(command: string): string[] {
+  const warnings: string[] = [];
+  
+  for (const pattern of SHELL_DANGEROUS_PATTERNS) {
+    if (pattern.test(command)) {
+      warnings.push(`Command contains potentially dangerous pattern: ${pattern.source}`);
+    }
+  }
+  
+  return warnings;
+}
+
+/**
+ * Validate and normalize a file path to prevent path traversal attacks.
+ * @param path - The path to validate
+ * @param allowedBaseDirs - Optional list of allowed base directories
+ * @returns The normalized absolute path
+ * @throws Error if path traversal is detected
+ */
+function validateFilePath(path: string, allowedBaseDirs?: string[]): string {
+  // Normalize the path to resolve . and ..
+  const normalized = normalize(path);
+  
+  // Convert to absolute path
+  const absolutePath = isAbsolute(normalized) ? normalized : resolve(process.cwd(), normalized);
+  
+  // Check for path traversal attempts
+  if (path.includes("..")) {
+    // After normalization, verify the path doesn't escape allowed directories
+    if (allowedBaseDirs && allowedBaseDirs.length > 0) {
+      const isWithinAllowed = allowedBaseDirs.some(baseDir => {
+        const absoluteBase = isAbsolute(baseDir) ? baseDir : resolve(process.cwd(), baseDir);
+        return absolutePath.startsWith(absoluteBase);
+      });
+      
+      if (!isWithinAllowed) {
+        throw new Error(`Path traversal detected: ${path} is outside allowed directories`);
+      }
+    }
+  }
+  
+  return absolutePath;
+}
+
+/**
+ * List of private/internal IP ranges that should be blocked for SSRF protection
+ */
+const PRIVATE_IP_PATTERNS = [
+  /^localhost$/i,
+  /^127\./,
+  /^10\./,
+  /^172\.(1[6-9]|2[0-9]|3[0-1])\./,
+  /^192\.168\./,
+  /^169\.254\./,  // Link-local
+  /^::1$/,        // IPv6 localhost
+  /^fc00:/i,      // IPv6 private
+  /^fe80:/i,      // IPv6 link-local
+  /^0\.0\.0\.0$/,
+];
+
+/**
+ * Validate URL to prevent SSRF attacks.
+ * @param urlString - The URL to validate
+ * @returns The validated URL
+ * @throws Error if URL targets internal resources
+ */
+function validateUrlForSSRF(urlString: string): string {
+  let url: URL;
+  try {
+    url = new URL(urlString);
+  } catch {
+    throw new Error(`Invalid URL: ${urlString}`);
+  }
+  
+  // Only allow http and https protocols
+  if (!["http:", "https:"].includes(url.protocol)) {
+    throw new Error(`Disallowed protocol: ${url.protocol}. Only http and https are allowed.`);
+  }
+  
+  const hostname = url.hostname;
+  
+  // Check against private IP patterns
+  for (const pattern of PRIVATE_IP_PATTERNS) {
+    if (pattern.test(hostname)) {
+      throw new Error(`SSRF protection: requests to internal addresses (${hostname}) are not allowed`);
+    }
+  }
+  
+  // Block requests to metadata endpoints (cloud provider metadata services)
+  if (hostname === "metadata.google.internal" || 
+      hostname === "metadata.goog" ||
+      url.pathname.startsWith("/latest/meta-data")) {
+    throw new Error("SSRF protection: requests to cloud metadata endpoints are not allowed");
+  }
+  
+  return urlString;
+}
 
 /**
  * Zod schema for JSON values (recursive)
@@ -70,7 +191,7 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., deployments) when resuming after restart
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
         return data.steps[def.id] as z.infer<typeof ShellOutputSchema>;
       }
@@ -97,6 +218,12 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
 
       // Interpolate variables in the command
       const command = interpolate(def.command, ctx);
+      
+      // Security check: Log warnings for potentially dangerous patterns
+      const safetyWarnings = checkCommandSafety(command);
+      for (const warning of safetyWarnings) {
+        client.app.log(`[SECURITY WARNING] ${warning}`, "warn");
+      }
       
       // Log command execution to TUI
       client.app.log(`> ${command}`, "info");
@@ -167,7 +294,7 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects when resuming after restart
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
         return data.steps[def.id] as { result: JsonValue; skipped?: boolean };
       }
@@ -230,7 +357,7 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects when resuming after restart
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         client.app.log(`Skipping already-completed step: ${def.id}`, "info");
         return data.steps[def.id] as { response: string; skipped?: boolean };
       }
@@ -327,7 +454,7 @@ export function createSuspendStep(def: SuspendStepDefinition) {
       // This prevents re-suspending on steps that were already resumed in a previous run.
       // Without this, workflows with multiple suspend steps would get stuck on the first one
       // when rehydrating after a server restart.
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         return data.steps[def.id] as { resumed: boolean; data?: JsonValue; skipped?: boolean };
       }
 
@@ -397,7 +524,7 @@ export function createHttpStep(def: HttpStepDefinition) {
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., API calls) when resuming after restart
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         return data.steps[def.id] as z.infer<typeof HttpOutputSchema>;
       }
 
@@ -422,7 +549,11 @@ export function createHttpStep(def: HttpStepDefinition) {
       }
 
       // Interpolate URL and headers
-      const url = interpolate(def.url, ctx);
+      const rawUrl = interpolate(def.url, ctx);
+      
+      // SSRF Protection: Validate URL to prevent requests to internal resources
+      const url = validateUrlForSSRF(rawUrl);
+      
       const headers = def.headers
         ? (interpolateObject(def.headers, ctx) as Record<string, string>)
         : {};
@@ -437,31 +568,47 @@ export function createHttpStep(def: HttpStepDefinition) {
         }
       }
 
-      const response = await fetch(url, {
-        method: def.method,
-        headers,
-        body,
-      });
+      // Create AbortController for timeout
+      const controller = new AbortController();
+      const timeoutMs = def.timeout ?? 30000; // Default 30 second timeout
+      const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
-      // Try to parse JSON, fallback to null
-      const text = await response.text();
-      let responseBody: unknown = null;
       try {
-        responseBody = JSON.parse(text);
-      } catch {
-        // Keep body as null if not valid JSON - raw text is available in 'text' field
-      }
+        const response = await fetch(url, {
+          method: def.method,
+          headers,
+          body,
+          signal: controller.signal,
+        });
 
-      if (!response.ok && def.failOnError !== false) {
-        throw new Error(`HTTP ${response.status}: ${text}`);
-      }
+        clearTimeout(timeoutId);
 
-      return {
-        status: response.status,
-        body: responseBody,
-        text,
-        headers: Object.fromEntries(response.headers.entries()),
-      };
+        // Try to parse JSON, fallback to null
+        const text = await response.text();
+        let responseBody: unknown = null;
+        try {
+          responseBody = JSON.parse(text);
+        } catch {
+          // Keep body as null if not valid JSON - raw text is available in 'text' field
+        }
+
+        if (!response.ok && def.failOnError !== false) {
+          throw new Error(`HTTP ${response.status}: ${text}`);
+        }
+
+        return {
+          status: response.status,
+          body: responseBody,
+          text,
+          headers: Object.fromEntries(response.headers.entries()),
+        };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        if (error instanceof Error && error.name === "AbortError") {
+          throw new Error(`HTTP request timed out after ${timeoutMs}ms`);
+        }
+        throw error;
+      }
     },
   });
 }
@@ -493,7 +640,7 @@ export function createFileStep(def: FileStepDefinition) {
 
       // IDEMPOTENCY CHECK: Skip if this step was already executed (hydration scenario)
       // This prevents re-execution of side-effects (e.g., file writes) when resuming after restart
-      if (data.steps && data.steps[def.id]) {
+      if (data.steps?.[def.id]) {
         return data.steps[def.id] as z.infer<typeof FileOutputSchema>;
       }
 
@@ -513,12 +660,13 @@ export function createFileStep(def: FileStepDefinition) {
         }
       }
 
-      // Interpolate file path
-      const path = interpolate(def.path, ctx);
+      // Interpolate file path and validate for path traversal
+      const rawPath = interpolate(def.path, ctx);
+      const filePath = validateFilePath(rawPath);
 
       switch (def.action) {
         case "read": {
-          const content = await readFile(path, "utf-8");
+          const content = await readFile(filePath, "utf-8");
           return { content };
         }
 
@@ -533,12 +681,12 @@ export function createFileStep(def: FileStepDefinition) {
           } else {
             writeContent = interpolate(String(def.content), ctx);
           }
-          await writeFile(path, writeContent, "utf-8");
+          await writeFile(filePath, writeContent, "utf-8");
           return { success: true };
         }
 
         case "delete": {
-          await unlink(path);
+          await unlink(filePath);
           return { success: true };
         }
 

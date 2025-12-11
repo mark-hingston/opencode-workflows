@@ -29,8 +29,8 @@ import { resolve } from "node:path";
  */
 interface PluginState {
   definitions: Map<string, WorkflowDefinition>;
-  factory: WorkflowFactory;
-  runner: WorkflowRunner;
+  factory: WorkflowFactory | null;
+  runner: WorkflowRunner | null;
   storage: WorkflowStorage | null;
   log: Logger;
   initialized: boolean;
@@ -112,8 +112,8 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
   // Plugin state (will be initialized on first use)
   const state: PluginState = {
     definitions: new Map(),
-    factory: null as unknown as WorkflowFactory,
-    runner: null as unknown as WorkflowRunner,
+    factory: null,
+    runner: null,
     storage: null,
     log,
     initialized: false,
@@ -155,15 +155,29 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
       }
     }
 
-    // Create factory and compile workflows
-    state.factory = new WorkflowFactory(clientAdapter);
-    for (const def of workflows.values()) {
-      try {
-        state.factory.compile(def);
-        log.debug(`Compiled workflow: ${def.id}`);
-      } catch (error) {
-        log.error(`Failed to compile workflow ${def.id}: ${error}`);
-      }
+    // Create factory and compile workflows in parallel
+    const factory = new WorkflowFactory(clientAdapter);
+    state.factory = factory;
+    
+    const compilationResults = await Promise.allSettled(
+      Array.from(workflows.values()).map(async (def) => {
+        try {
+          factory.compile(def);
+          log.debug(`Compiled workflow: ${def.id}`);
+          return { id: def.id, success: true };
+        } catch (error) {
+          log.error(`Failed to compile workflow ${def.id}: ${error}`);
+          return { id: def.id, success: false, error };
+        }
+      })
+    );
+
+    // Log compilation summary
+    const failedCount = compilationResults.filter(
+      (r) => r.status === "rejected" || (r.status === "fulfilled" && !r.value.success)
+    ).length;
+    if (failedCount > 0) {
+      log.warn(`${failedCount} workflow(s) failed to compile`);
     }
 
     // Create storage for persistence
@@ -262,6 +276,11 @@ Modes:
           // Ensure initialized
           if (!state.initialized) {
             await initialize();
+          }
+
+          // Guard against uninitialized state
+          if (!state.runner) {
+            return JSON.stringify({ success: false, message: "Workflow runner not initialized" });
           }
 
           const result = await executeWorkflowTool(

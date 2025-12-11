@@ -79,7 +79,8 @@ function createMastraStep(def: StepDefinition, client: OpencodeClient): unknown 
 }
 
 /**
- * Group steps by their level in the DAG (for parallel execution)
+ * Group steps by their level in the DAG (for parallel execution).
+ * Uses iterative approach with memoization to avoid stack overflow on deep workflows.
  */
 function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
   const levels: StepDefinition[][] = [];
@@ -90,22 +91,78 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
     stepMap.set(step.id, step);
   }
 
-  // Calculate level for each step
-  function getLevel(stepId: string): number {
-    if (stepLevels.has(stepId)) {
-      return stepLevels.get(stepId) ?? 0;
+  /**
+   * Calculate level for a step iteratively to avoid stack overflow.
+   * Uses a stack-based approach instead of recursion.
+   */
+  function getLevel(startStepId: string): number {
+    // If already computed, return cached value
+    if (stepLevels.has(startStepId)) {
+      return stepLevels.get(startStepId) ?? 0;
     }
 
-    const step = stepMap.get(stepId);
-    if (!step?.after || step.after.length === 0) {
-      stepLevels.set(stepId, 0);
-      return 0;
+    // Stack of steps to process (step ID, visited flag for post-order processing)
+    const stack: Array<{ stepId: string; phase: "pre" | "post" }> = [
+      { stepId: startStepId, phase: "pre" },
+    ];
+    
+    // Track steps currently being processed to detect cycles
+    const inProgress = new Set<string>();
+    
+    while (stack.length > 0) {
+      const current = stack.pop();
+      if (!current) break;
+      
+      const { stepId, phase } = current;
+      
+      // Check if already computed
+      if (stepLevels.has(stepId)) {
+        continue;
+      }
+      
+      const step = stepMap.get(stepId);
+      
+      if (phase === "pre") {
+        // First visit: push for post-processing and push dependencies
+        if (!step?.after || step.after.length === 0) {
+          // No dependencies, level is 0
+          stepLevels.set(stepId, 0);
+          continue;
+        }
+        
+        // Check if all dependencies are computed
+        const allDepsComputed = step.after.every((dep) => stepLevels.has(dep));
+        
+        if (allDepsComputed) {
+          // Compute level from dependencies
+          const maxDepLevel = Math.max(...step.after.map((dep) => stepLevels.get(dep) ?? 0));
+          stepLevels.set(stepId, maxDepLevel + 1);
+        } else {
+          // Push self for post-processing
+          stack.push({ stepId, phase: "post" });
+          inProgress.add(stepId);
+          
+          // Push uncomputed dependencies
+          for (const dep of step.after) {
+            if (!stepLevels.has(dep) && !inProgress.has(dep)) {
+              stack.push({ stepId: dep, phase: "pre" });
+            }
+          }
+        }
+      } else {
+        // Post-processing: all dependencies should now be computed
+        inProgress.delete(stepId);
+        
+        if (!step?.after || step.after.length === 0) {
+          stepLevels.set(stepId, 0);
+        } else {
+          const maxDepLevel = Math.max(...step.after.map((dep) => stepLevels.get(dep) ?? 0));
+          stepLevels.set(stepId, maxDepLevel + 1);
+        }
+      }
     }
-
-    const maxDepLevel = Math.max(...step.after.map(getLevel));
-    const level = maxDepLevel + 1;
-    stepLevels.set(stepId, level);
-    return level;
+    
+    return stepLevels.get(startStepId) ?? 0;
   }
 
   // Calculate levels for all steps

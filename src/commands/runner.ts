@@ -9,6 +9,10 @@ import type { WorkflowStorage } from "../storage/index.js";
 export interface WorkflowRunnerConfig {
   /** Global timeout for workflow execution in milliseconds (default: 300000 = 5 minutes) */
   timeout?: number;
+  /** Maximum number of completed runs to keep in memory (default: 1000) */
+  maxCompletedRuns?: number;
+  /** Whether to throw on persistence failures (default: false) */
+  throwOnPersistenceError?: boolean;
 }
 
 /**
@@ -77,6 +81,8 @@ export class WorkflowRunner {
   private mastraRuns = new Map<string, MastraRun>();
   private runningPromises = new Map<string, Promise<void>>();
   private timeout: number;
+  private maxCompletedRuns: number;
+  private throwOnPersistenceError: boolean;
 
   constructor(
     private factory: WorkflowFactory,
@@ -85,6 +91,8 @@ export class WorkflowRunner {
     config?: WorkflowRunnerConfig
   ) {
     this.timeout = config?.timeout ?? 300000; // Default 5 minutes
+    this.maxCompletedRuns = config?.maxCompletedRuns ?? 1000;
+    this.throwOnPersistenceError = config?.throwOnPersistenceError ?? false;
   }
 
   /**
@@ -106,7 +114,7 @@ export class WorkflowRunner {
   }
 
   /**
-   * Persist a run to storage
+   * Persist a run to storage with proper error handling
    */
   private async persistRun(run: WorkflowRun): Promise<void> {
     if (!this.storage) return;
@@ -115,6 +123,41 @@ export class WorkflowRunner {
       await this.storage.saveRun(run);
     } catch (error) {
       this.log.error(`Failed to persist run ${run.runId}: ${error}`);
+      if (this.throwOnPersistenceError) {
+        throw new Error(`Persistence failed for run ${run.runId}: ${error}`);
+      }
+    }
+  }
+
+  /**
+   * Clean up completed/failed/cancelled runs to prevent memory leaks.
+   * Keeps the most recent runs up to maxCompletedRuns.
+   */
+  private cleanupCompletedRuns(): void {
+    const terminalStatuses: WorkflowRun["status"][] = ["completed", "failed", "cancelled"];
+    const completedRuns: WorkflowRun[] = [];
+
+    for (const run of this.runs.values()) {
+      if (terminalStatuses.includes(run.status)) {
+        completedRuns.push(run);
+      }
+    }
+
+    // Sort by completion time (most recent first)
+    completedRuns.sort((a, b) => {
+      const aTime = a.completedAt?.getTime() ?? a.startedAt.getTime();
+      const bTime = b.completedAt?.getTime() ?? b.startedAt.getTime();
+      return bTime - aTime;
+    });
+
+    // Remove excess runs beyond the limit
+    if (completedRuns.length > this.maxCompletedRuns) {
+      const runsToRemove = completedRuns.slice(this.maxCompletedRuns);
+      for (const run of runsToRemove) {
+        this.runs.delete(run.runId);
+        this.mastraRuns.delete(run.runId);
+        this.log.debug(`Cleaned up old run: ${run.runId}`);
+      }
     }
   }
 
@@ -243,12 +286,14 @@ export class WorkflowRunner {
       run.status = "completed";
       run.completedAt = new Date();
       await this.persistRun(run);
+      this.cleanupCompletedRuns();
       this.log.info(`Workflow ${compiled.id} completed successfully`);
     } catch (error) {
       run.status = "failed";
       run.error = String(error);
       run.completedAt = new Date();
       await this.persistRun(run);
+      this.cleanupCompletedRuns();
       this.log.error(`Workflow ${compiled.id} failed: ${error}`);
     }
   }
@@ -353,12 +398,14 @@ export class WorkflowRunner {
       run.status = "completed";
       run.completedAt = new Date();
       await this.persistRun(run);
+      this.cleanupCompletedRuns();
       this.log.info(`Workflow ${run.workflowId} completed after resume`);
     } catch (error) {
       run.status = "failed";
       run.error = String(error);
       run.completedAt = new Date();
       await this.persistRun(run);
+      this.cleanupCompletedRuns();
       this.log.error(`Workflow ${run.workflowId} failed after resume: ${error}`);
     }
   }
@@ -379,6 +426,7 @@ export class WorkflowRunner {
     run.status = "cancelled";
     run.completedAt = new Date();
     await this.persistRun(run);
+    this.cleanupCompletedRuns();
     this.log.info(`Cancelled workflow run: ${runId}`);
 
     // Clean up Mastra run

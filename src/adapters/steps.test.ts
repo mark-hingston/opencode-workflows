@@ -917,6 +917,7 @@ describe("Step Adapters", () => {
           method: "GET",
           headers: {},
           body: undefined,
+          signal: expect.any(AbortSignal),
         });
       });
 
