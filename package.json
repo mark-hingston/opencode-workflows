@@ -23,7 +23,7 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/mark-hingston/opencode-workflows.git"
+    "url": "git+https://github.com/mark-hingston/opencode-workflows.git"
   },
   "bugs": {
     "url": "https://github.com/mark-hingston/opencode-workflows/issues"
