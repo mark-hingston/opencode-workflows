@@ -1,0 +1,44 @@
+{
+  "id": "run-ci",
+  "name": "Run CI Pipeline",
+  "description": "Runs lint, tests, and type checks in parallel",
+  "version": "1.0.0",
+  "tags": ["ci", "testing"],
+  "steps": [
+    {
+      "id": "install-deps",
+      "type": "shell",
+      "command": "npm ci",
+      "description": "Install dependencies"
+    },
+    {
+      "id": "lint",
+      "type": "shell",
+      "command": "npm run lint",
+      "description": "Run linter",
+      "after": ["install-deps"],
+      "failOnError": false
+    },
+    {
+      "id": "typecheck",
+      "type": "shell",
+      "command": "npm run typecheck",
+      "description": "Run type checking",
+      "after": ["install-deps"]
+    },
+    {
+      "id": "test",
+      "type": "shell",
+      "command": "npm test",
+      "description": "Run tests",
+      "after": ["install-deps"]
+    },
+    {
+      "id": "summarize",
+      "type": "agent",
+      "prompt": "Summarize the CI pipeline results. Lint exited with: {{steps.lint.exitCode}}, Typecheck: {{steps.typecheck.exitCode}}, Tests: {{steps.test.exitCode}}. Provide a brief status report.",
+      "description": "Generate CI summary",
+      "after": ["lint", "typecheck", "test"]
+    }
+  ]
+}

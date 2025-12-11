@@ -1,0 +1,53 @@
+{
+  "id": "deploy-prod",
+  "name": "Deploy to Production",
+  "description": "Deploys the application to production with tests and approval",
+  "version": "1.0.0",
+  "tags": ["deployment", "production"],
+  "inputs": {
+    "version": "string"
+  },
+  "steps": [
+    {
+      "id": "check-git",
+      "type": "shell",
+      "command": "git status --porcelain",
+      "description": "Ensure git working directory is clean"
+    },
+    {
+      "id": "run-tests",
+      "type": "shell",
+      "command": "npm test",
+      "description": "Run the test suite",
+      "after": ["check-git"]
+    },
+    {
+      "id": "run-build",
+      "type": "shell",
+      "command": "npm run build",
+      "description": "Build the application",
+      "after": ["run-tests"]
+    },
+    {
+      "id": "ask-approval",
+      "type": "suspend",
+      "description": "Wait for user to approve deployment",
+      "message": "Tests passed and build succeeded. Ready to deploy version {{inputs.version}}. Resume to continue.",
+      "after": ["run-build"]
+    },
+    {
+      "id": "deploy-script",
+      "type": "shell",
+      "command": "npm run deploy -- --tag {{inputs.version}}",
+      "description": "Deploy to production",
+      "after": ["ask-approval"]
+    },
+    {
+      "id": "notify-complete",
+      "type": "agent",
+      "prompt": "Generate a brief deployment success message for version {{inputs.version}}. Be concise and professional.",
+      "description": "Generate completion message",
+      "after": ["deploy-script"]
+    }
+  ]
+}

@@ -1,0 +1,63 @@
+{
+  "name": "opencode-workflows",
+  "version": "0.1.0",
+  "description": "Workflow automation plugin for OpenCode using Mastra engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "type": "module",
+  "scripts": {
+    "build": "tsup src/index.ts --format esm --dts",
+    "dev": "tsup src/index.ts --format esm --dts --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "keywords": [
+    "opencode",
+    "plugin",
+    "workflow",
+    "mastra",
+    "automation"
+  ],
+  "author": "",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/mark-hingston/opencode-workflows.git"
+  },
+  "bugs": {
+    "url": "https://github.com/mark-hingston/opencode-workflows/issues"
+  },
+  "homepage": "https://github.com/mark-hingston/opencode-workflows#readme",
+  "dependencies": {
+    "@mastra/core": "^0.24.0",
+    "@mastra/libsql": "^0.16.0",
+    "@opencode-ai/plugin": "^1.0.146",
+    "strip-json-comments": "^5.0.3",
+    "zod": "^3.25.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@vitest/coverage-v8": "^2.1.9",
+    "tsup": "^8.0.0",
+    "typescript": "^5.7.0",
+    "vitest": "^2.0.0"
+  },
+  "peerDependenciesMeta": {
+    "opencode": {
+      "optional": true
+    }
+  },
+  "peerDependencies": {
+    "opencode": "*"
+  },
+  "files": [
+    "dist"
+  ],
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    }
+  }
+}
