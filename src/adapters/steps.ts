@@ -65,13 +65,6 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
     description: def.description || `Execute: ${def.command}`,
     inputSchema: StepInputSchema,
     outputSchema: ShellOutputSchema,
-    // Pass retry config to Mastra if defined
-    retry: def.retry
-      ? {
-          attempts: def.retry.attempts,
-          delay: def.retry.delay,
-        }
-      : undefined,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
 
@@ -169,13 +162,6 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
       result: JsonValueSchema,
       skipped: z.boolean().optional(),
     }),
-    // Pass retry config to Mastra if defined
-    retry: def.retry
-      ? {
-          attempts: def.retry.attempts,
-          delay: def.retry.delay,
-        }
-      : undefined,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
 
@@ -239,13 +225,6 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
       response: z.string(),
       skipped: z.boolean().optional(),
     }),
-    // Pass retry config to Mastra if defined
-    retry: def.retry
-      ? {
-          attempts: def.retry.attempts,
-          delay: def.retry.delay,
-        }
-      : undefined,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
 
@@ -413,12 +392,6 @@ export function createHttpStep(def: HttpStepDefinition) {
     description: def.description || `${def.method} ${def.url}`,
     inputSchema: StepInputSchema,
     outputSchema: HttpOutputSchema,
-    retry: def.retry
-      ? {
-          attempts: def.retry.attempts,
-          delay: def.retry.delay,
-        }
-      : undefined,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
 
@@ -515,12 +488,6 @@ export function createFileStep(def: FileStepDefinition) {
     description: def.description || `File ${def.action}: ${def.path}`,
     inputSchema: StepInputSchema,
     outputSchema: FileOutputSchema,
-    retry: def.retry
-      ? {
-          attempts: def.retry.attempts,
-          delay: def.retry.delay,
-        }
-      : undefined,
     execute: async ({ inputData }) => {
       const data = inputData as StepInput;
 
