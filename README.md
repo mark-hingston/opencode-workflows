@@ -149,10 +149,30 @@ And in the database, the `apiToken` and `webhookSecret` values are stored encryp
 
 ## Workflow Definitions
 
-Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JSONC files support comments for better documentation:
+Create workflow definitions in `.opencode/workflows/` as JSON or JSONC files. JSONC files support comments for better documentation.
+
+### JSON Schema
+
+Workflow files support JSON Schema for IDE validation and autocomplete. Add the `$schema` property to your workflow files:
+
+```json
+{
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
+  "id": "my-workflow",
+  ...
+}
+```
+
+This provides:
+- **Autocomplete** for step types, properties, and values
+- **Inline validation** for required fields and type mismatches
+- **Hover documentation** for properties
+
+### Example Workflow
 
 ```jsonc
 {
+  "$schema": "https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json",
   // Unique workflow identifier
   "id": "deploy-prod",
   "description": "Deploys the application to production",
