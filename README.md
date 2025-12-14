@@ -682,6 +682,10 @@ Eval steps can generate workflows dynamically at runtime, enabling "agentic plan
 
 When the script returns `{ workflow: WorkflowDefinition }`, the generated workflow is validated and executed as a sub-workflow.
 
+**Accessing Dynamic Results:**
+
+When a dynamic sub-workflow executes, the parent step returns the sub-workflow's Run ID. Currently, the parent workflow does not automatically inherit the outputs of the child workflow. To use results from a dynamic workflow, the child workflow should write to a shared resource (like a file or database) that subsequent steps in the parent workflow can read.
+
 **Security:**
 
 The eval sandbox blocks access to:
