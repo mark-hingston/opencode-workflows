@@ -634,41 +634,92 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
 // =============================================================================
 
 /**
+ * Convert a JSON Schema object to a Zod schema.
+ * Supports basic types commonly used in workflow resume data.
+ * 
+ * @param jsonSchema - JSON Schema object with field names as keys and type definitions as values
+ * @returns A Zod object schema for validation
+ */
+function jsonSchemaToZod(jsonSchema: JsonObject): z.ZodObject<Record<string, z.ZodTypeAny>> {
+  const shape: Record<string, z.ZodTypeAny> = {};
+  
+  for (const [key, typeDef] of Object.entries(jsonSchema)) {
+    // Handle both simple type strings and full JSON Schema objects
+    const typeValue = typeof typeDef === 'object' && typeDef !== null && 'type' in typeDef
+      ? (typeDef as { type: string }).type
+      : typeDef;
+    
+    switch (typeValue) {
+      case 'string':
+        shape[key] = z.string();
+        break;
+      case 'number':
+        shape[key] = z.number();
+        break;
+      case 'integer':
+        shape[key] = z.number().int();
+        break;
+      case 'boolean':
+        shape[key] = z.boolean();
+        break;
+      case 'array':
+        shape[key] = z.array(z.unknown());
+        break;
+      case 'object':
+        shape[key] = z.record(z.unknown());
+        break;
+      default:
+        // For unknown types, accept any value
+        shape[key] = z.unknown();
+    }
+  }
+  
+  return z.object(shape);
+}
+
+/** Schema for suspend payload - defines what data is passed when suspending */
+const SuspendPayloadSchema = z.object({
+  /** Message to display to the user when workflow is suspended */
+  message: z.string(),
+  /** Optional additional context for the suspension */
+  stepId: z.string().optional(),
+  /** Schema description for expected resume data (for UI hints) */
+  resumeSchemaHint: z.record(z.string()).optional(),
+});
+
+/**
  * Creates a Mastra step that suspends execution for human approval.
  * 
- * NOTE: Suspend steps are special - they don't follow the normal context accumulation
- * pattern because Mastra handles suspension/resumption internally.
+ * This step uses Mastra's built-in resumeSchema for automatic validation
+ * of resume data, and suspendSchema for structured suspend payloads.
  * 
  * IMPORTANT: Returns the full accumulated context so subsequent steps can
  * access this step's output via {{steps.stepId.resumed}} interpolation.
  */
 export function createSuspendStep(def: SuspendStepDefinition) {
+  // Build the resume schema from the JSON Schema definition if provided
+  // Mastra will automatically validate resume data against this schema
+  const resumeSchema = def.resumeSchema 
+    ? jsonSchemaToZod(def.resumeSchema)
+    : undefined;
+
   return createStep({
     id: def.id,
     description: def.description || "Awaiting human input",
     inputSchema: StepContextSchema,
     outputSchema: StepContextSchema,
+    // Pass resumeSchema to Mastra for automatic validation
+    resumeSchema,
+    // Define the structure of suspend payload for type safety
+    suspendSchema: SuspendPayloadSchema,
     execute: async ({ inputData, suspend, resumeData }) => {
       const data = inputData as StepContext;
       const secretInputs = data.secretInputs || [];
 
       // If we have resumeData, we're resuming from a suspended state
+      // Note: Mastra automatically validates resumeData against resumeSchema
+      // before calling execute, so we don't need manual validation here
       if (resumeData !== undefined) {
-        // Validate resume data against schema if provided
-        if (def.resumeSchema) {
-          const schemaKeys = Object.keys(def.resumeSchema);
-          const resumeObj = resumeData as JsonObject;
-          
-          if (typeof resumeObj !== 'object' || resumeObj === null) {
-            throw new Error("Resume data must be an object");
-          }
-
-          const missing = schemaKeys.filter(k => !(k in resumeObj));
-          if (missing.length > 0) {
-            throw new Error(`Missing required resume data: ${missing.join(", ")}`);
-          }
-        }
-
         const stepResult = { resumed: true, data: resumeData };
         return {
           inputs: data.inputs || {},
@@ -695,7 +746,7 @@ export function createSuspendStep(def: SuspendStepDefinition) {
       if (def.condition) {
         const evaluated = interpolate(def.condition, ctx);
         if (evaluated === "false" || evaluated === "0" || evaluated === "") {
-          const skipResult = { resumed: false, data: undefined, skipped: true };
+          const skipResult = { resumed: false, data: null, skipped: true };
           return {
             inputs: data.inputs || {},
             steps: { ...ctx.steps, [def.id]: skipResult },
@@ -708,11 +759,25 @@ export function createSuspendStep(def: SuspendStepDefinition) {
         ? interpolate(def.message, ctx)
         : "Workflow paused. Resume to continue.";
 
-      // Suspend and wait for resume
-      await suspend({ message });
+      // Suspend with structured payload (validated by suspendSchema)
+      // Include resume schema hint for potential UI rendering
+      await suspend({ 
+        message,
+        stepId: def.id,
+        resumeSchemaHint: def.resumeSchema 
+          ? Object.fromEntries(
+              Object.entries(def.resumeSchema).map(([k, v]) => [
+                k, 
+                typeof v === 'object' && v !== null && 'type' in v 
+                  ? String((v as { type: string }).type)
+                  : String(v)
+              ])
+            )
+          : undefined,
+      });
 
       // This won't be reached until resumed - return context with pending result
-      const stepResult = { resumed: true, data: undefined };
+      const stepResult = { resumed: true, data: null };
       return {
         inputs: data.inputs || {},
         steps: { ...ctx.steps, [def.id]: stepResult },

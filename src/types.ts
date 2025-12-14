@@ -154,7 +154,35 @@ export interface SuspendStepDefinition extends BaseStepDefinition {
   type: "suspend";
   /** Message to display when suspending */
   message?: string;
-  /** Schema for expected resume data (JSON Schema format) */
+  /** 
+   * Schema for expected resume data (JSON Schema format).
+   * This schema is passed to Mastra's resumeSchema for automatic validation.
+   * 
+   * Supported type values:
+   * - "string" - Text input
+   * - "number" - Numeric input (decimal)
+   * - "integer" - Whole number input
+   * - "boolean" - True/false input
+   * - "array" - Array of values
+   * - "object" - Nested object
+   * 
+   * @example
+   * ```json
+   * {
+   *   "approved": "boolean",
+   *   "comment": "string",
+   *   "priority": "integer"
+   * }
+   * ```
+   * 
+   * @example Full JSON Schema format
+   * ```json
+   * {
+   *   "approved": { "type": "boolean" },
+   *   "comment": { "type": "string" }
+   * }
+   * ```
+   */
   resumeSchema?: JsonObject;
 }
 

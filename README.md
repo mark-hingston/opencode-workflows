@@ -493,6 +493,34 @@ Pause for human input:
 }
 ```
 
+**Resume Data Schema:**
+
+For workflows that need structured input when resuming, define a `resumeSchema`:
+
+```json
+{
+  "id": "approval",
+  "type": "suspend",
+  "message": "Review the changes and provide approval.",
+  "resumeSchema": {
+    "approved": "boolean",
+    "comment": "string"
+  }
+}
+```
+
+When a `resumeSchema` is defined:
+- Resume data is automatically validated against the schema
+- Invalid or missing fields cause an error before the workflow continues
+- The resume data is available in subsequent steps via `{{steps.approval.data.approved}}`
+
+Supported schema types: `string`, `number`, `integer`, `boolean`, `array`, `object`
+
+Resume a workflow with data:
+```
+/workflow resume <runId> {"approved": true, "comment": "LGTM"}
+```
+
 ### Wait Step
 Pause workflow execution for a specified duration (platform-independent alternative to `shell: sleep`):
 ```json
