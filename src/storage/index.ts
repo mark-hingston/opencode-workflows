@@ -289,6 +289,8 @@ export class WorkflowStorage {
       "CREATE INDEX IF NOT EXISTS idx_workflow_id ON opencode_workflow_runs(workflow_id)",
       "CREATE INDEX IF NOT EXISTS idx_status ON opencode_workflow_runs(status)",
       "CREATE INDEX IF NOT EXISTS idx_started_at ON opencode_workflow_runs(started_at)",
+      // Composite index for cleanup queries (filter by date + status)
+      "CREATE INDEX IF NOT EXISTS idx_cleanup ON opencode_workflow_runs(started_at, status)",
     ];
 
     for (const sql of indexes) {
@@ -443,6 +445,50 @@ export class WorkflowStorage {
   }
 
   /**
+   * Delete workflow runs older than a specific date.
+   * Only deletes runs in terminal states (completed, failed, cancelled).
+   * Returns the number of deleted runs.
+   * 
+   * @param cutoffDate - Runs started before this date will be deleted
+   * @returns Number of deleted runs
+   */
+  async deleteRunsOlderThan(cutoffDate: Date): Promise<number> {
+    await this.init();
+    if (!this.store) throw new Error("Storage not initialized");
+
+    const cutoffIso = cutoffDate.toISOString();
+    
+    try {
+      // First, count how many will be deleted
+      const countResult = await this.store.executeSQL(
+        `SELECT COUNT(*) as count FROM opencode_workflow_runs 
+         WHERE started_at < ? 
+         AND status IN (?, ?, ?)`,
+        [cutoffIso, "completed", "failed", "cancelled"]
+      );
+      
+      const count = (countResult.rows[0] as DatabaseRow & { count?: number })?.count ?? 0;
+      
+      if (count === 0) {
+        return 0;
+      }
+      
+      // Delete old runs (only terminal states to preserve active workflows)
+      await this.store.executeSQL(
+        `DELETE FROM opencode_workflow_runs 
+         WHERE started_at < ? 
+         AND status IN (?, ?, ?)`,
+        [cutoffIso, "completed", "failed", "cancelled"]
+      );
+      
+      return count;
+    } catch (error) {
+      this.log.error(`Failed to delete old runs: ${error}`);
+      return 0;
+    }
+  }
+
+  /**
    * Load a workflow run by ID
    */
   async loadRun(runId: string): Promise<WorkflowRun | null> {
@@ -460,9 +506,14 @@ export class WorkflowStorage {
   }
 
   /**
-   * Load all workflow runs, optionally filtered by workflow ID
+   * Load all workflow runs, optionally filtered by workflow ID.
+   * Supports pagination for efficient loading of large datasets.
+   * 
+   * @param workflowId - Optional filter by workflow ID
+   * @param limit - Maximum number of runs to return (default: 100)
+   * @param offset - Number of runs to skip (default: 0)
    */
-  async loadAllRuns(workflowId?: string): Promise<WorkflowRun[]> {
+  async loadAllRuns(workflowId?: string, limit = 100, offset = 0): Promise<WorkflowRun[]> {
     await this.init();
     if (!this.store) throw new Error("Storage not initialized");
 
@@ -474,7 +525,8 @@ export class WorkflowStorage {
       args.push(workflowId);
     }
 
-    sql += " ORDER BY started_at DESC";
+    sql += " ORDER BY started_at DESC LIMIT ? OFFSET ?";
+    args.push(limit, offset);
 
     try {
       const result = await this.store.executeSQL(sql, args);
@@ -482,6 +534,32 @@ export class WorkflowStorage {
     } catch (error) {
       this.log.error(`Failed to load runs: ${error}`);
       return [];
+    }
+  }
+
+  /**
+   * Count total number of workflow runs, optionally filtered by workflow ID.
+   * Useful for pagination to know total number of pages.
+   */
+  async countRuns(workflowId?: string): Promise<number> {
+    await this.init();
+    if (!this.store) throw new Error("Storage not initialized");
+
+    let sql = "SELECT COUNT(*) as count FROM opencode_workflow_runs";
+    const args: (string | number | null)[] = [];
+
+    if (workflowId) {
+      sql += " WHERE workflow_id = ?";
+      args.push(workflowId);
+    }
+
+    try {
+      const result = await this.store.executeSQL(sql, args);
+      const row = result.rows[0] as DatabaseRow & { count?: number };
+      return row?.count ?? 0;
+    } catch (error) {
+      this.log.error(`Failed to count runs: ${error}`);
+      return 0;
     }
   }
 

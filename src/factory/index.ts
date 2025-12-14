@@ -278,6 +278,7 @@ export function createWorkflowFromDefinition(
  */
 export class WorkflowFactory {
   private compiledWorkflows = new Map<string, WorkflowFactoryResult>();
+  private definitions = new Map<string, WorkflowDefinition>();
 
   constructor(private client: OpencodeClient) {}
 
@@ -290,7 +291,16 @@ export class WorkflowFactory {
   }
 
   /**
-   * Compile a workflow definition into a Mastra workflow
+   * Register a workflow definition for lazy compilation.
+   * The workflow will be compiled on first access via get().
+   */
+  register(definition: WorkflowDefinition): void {
+    this.definitions.set(definition.id, definition);
+  }
+
+  /**
+   * Compile a workflow definition into a Mastra workflow.
+   * This is now primarily used for immediate compilation when needed.
    */
   compile(definition: WorkflowDefinition): WorkflowFactoryResult {
     const result = createWorkflowFromDefinition(definition, this.client);
@@ -299,35 +309,64 @@ export class WorkflowFactory {
   }
 
   /**
-   * Get a compiled workflow by ID
+   * Get a compiled workflow by ID.
+   * If the workflow hasn't been compiled yet, it will be compiled on-demand.
    */
   get(id: string): WorkflowFactoryResult | undefined {
-    return this.compiledWorkflows.get(id);
+    // Check if already compiled
+    let compiled = this.compiledWorkflows.get(id);
+    
+    if (!compiled) {
+      // Lazy compile: check if we have a definition
+      const definition = this.definitions.get(id);
+      if (definition) {
+        compiled = this.compile(definition);
+      }
+    }
+    
+    return compiled;
   }
 
   /**
-   * Check if a workflow is compiled
+   * Check if a workflow is available (either compiled or has a definition)
    */
   has(id: string): boolean {
-    return this.compiledWorkflows.has(id);
+    return this.compiledWorkflows.has(id) || this.definitions.has(id);
   }
 
   /**
-   * List all compiled workflow IDs
+   * List all available workflow IDs (both compiled and registered)
    */
   list(): string[] {
-    return Array.from(this.compiledWorkflows.keys());
+    const ids = new Set<string>();
+    for (const id of this.compiledWorkflows.keys()) {
+      ids.add(id);
+    }
+    for (const id of this.definitions.keys()) {
+      ids.add(id);
+    }
+    return Array.from(ids);
   }
 
   /**
-   * Clear all compiled workflows
+   * Clear all compiled workflows and definitions
    */
   clear(): void {
     this.compiledWorkflows.clear();
+    this.definitions.clear();
   }
 
   /**
-   * Compile multiple workflow definitions
+   * Register multiple workflow definitions for lazy compilation
+   */
+  registerAll(definitions: WorkflowDefinition[]): void {
+    for (const def of definitions) {
+      this.register(def);
+    }
+  }
+
+  /**
+   * Compile multiple workflow definitions immediately (legacy method)
    */
   compileAll(definitions: WorkflowDefinition[]): void {
     for (const def of definitions) {

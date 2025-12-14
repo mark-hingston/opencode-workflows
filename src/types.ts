@@ -65,6 +65,10 @@ export interface WorkflowPluginConfig {
   timeout?: number;
   /** Enable verbose logging */
   verbose?: boolean;
+  /** Maximum number of completed runs to keep in memory (default: 1000) */
+  maxCompletedRuns?: number;
+  /** Maximum age of runs to keep in database in days (default: 30). Older runs will be archived/deleted. */
+  maxRunAge?: number;
 }
 
 export const DEFAULT_CONFIG: Required<WorkflowPluginConfig> = {
@@ -72,6 +76,8 @@ export const DEFAULT_CONFIG: Required<WorkflowPluginConfig> = {
   dbPath: ".opencode/data/workflows.db",
   timeout: 300000, // 5 minutes
   verbose: false,
+  maxCompletedRuns: 1000,
+  maxRunAge: 30, // 30 days
 };
 
 // =============================================================================

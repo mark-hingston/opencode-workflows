@@ -98,6 +98,41 @@ function getConfig(): WorkflowPluginConfig {
 }
 
 /**
+ * Setup a periodic cleanup job to archive/delete old workflow runs
+ * Runs once per day at midnight
+ */
+function setupCleanupJob(storage: WorkflowStorage, log: Logger, maxAgeInDays: number): void {
+  const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
+  
+  async function cleanupOldRuns() {
+    try {
+      const cutoffDate = new Date(Date.now() - maxAgeInDays * MILLISECONDS_PER_DAY);
+      const deletedCount = await storage.deleteRunsOlderThan(cutoffDate);
+      
+      if (deletedCount > 0) {
+        log.info(`Cleanup: Deleted ${deletedCount} workflow run(s) older than ${maxAgeInDays} days`);
+      }
+    } catch (error) {
+      log.error(`Failed to cleanup old runs: ${error}`);
+    }
+  }
+  
+  // Run cleanup once per day at midnight
+  const now = new Date();
+  const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
+  const msUntilMidnight = tomorrow.getTime() - now.getTime();
+  
+  // Schedule first cleanup at midnight
+  setTimeout(() => {
+    cleanupOldRuns();
+    // Then run every 24 hours
+    setInterval(cleanupOldRuns, MILLISECONDS_PER_DAY);
+  }, msUntilMidnight);
+  
+  log.debug(`Scheduled cleanup job to run daily (max age: ${maxAgeInDays} days)`);
+}
+
+/**
  * OpenCode Workflow Plugin
  *
  * Usage: Place this file in .opencode/plugin/ directory
@@ -150,7 +185,17 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
     state.definitions = workflows;
 
-    // Validate tool references in workflows before compilation
+    // Create factory and register workflows for lazy compilation
+    const factory = new WorkflowFactory(clientAdapter);
+    state.factory = factory;
+    
+    // Register all workflow definitions (no compilation yet)
+    // Workflows will be compiled on-demand when first accessed
+    for (const def of workflows.values()) {
+      factory.register(def);
+    }
+
+    // Validate tool references in workflows (without compilation)
     // This provides early warning for missing tools rather than runtime failures
     for (const [id, def] of workflows) {
       for (const step of def.steps) {
@@ -160,31 +205,6 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
           }
         }
       }
-    }
-
-    // Create factory and compile workflows in parallel
-    const factory = new WorkflowFactory(clientAdapter);
-    state.factory = factory;
-    
-    const compilationResults = await Promise.allSettled(
-      Array.from(workflows.values()).map(async (def) => {
-        try {
-          factory.compile(def);
-          log.debug(`Compiled workflow: ${def.id}`);
-          return { id: def.id, success: true };
-        } catch (error) {
-          log.error(`Failed to compile workflow ${def.id}: ${error}`);
-          return { id: def.id, success: false, error };
-        }
-      })
-    );
-
-    // Log compilation summary
-    const failedCount = compilationResults.filter(
-      (r) => r.status === "rejected" || (r.status === "fulfilled" && !r.value.success)
-    ).length;
-    if (failedCount > 0) {
-      log.warn(`${failedCount} workflow(s) failed to compile`);
     }
 
     // Create storage for persistence
@@ -210,6 +230,7 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     // Create runner with storage and timeout config
     state.runner = new WorkflowRunner(state.factory, log, state.storage, {
       timeout: config.timeout,
+      maxCompletedRuns: config.maxCompletedRuns,
     });
 
     // Restore active runs from storage
@@ -221,6 +242,11 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     // Setup triggers after initialization
     if (state.runner) {
       setupTriggersFromModule(state.triggers, state.definitions, state.runner, log);
+    }
+
+    // Setup cleanup job if maxRunAge is configured
+    if (config.maxRunAge && state.storage) {
+      setupCleanupJob(state.storage, log, config.maxRunAge);
     }
   }
 

@@ -36,6 +36,28 @@ The plugin uses sensible defaults but can be configured via environment variable
 | `WORKFLOW_DB_PATH` | `.opencode/data/workflows.db` | SQLite database path for persisting workflow runs |
 | `WORKFLOW_TIMEOUT` | `300000` (5 min) | Global timeout for workflow execution in milliseconds |
 | `WORKFLOW_VERBOSE` | `false` | Enable verbose debug logging |
+| `WORKFLOW_MAX_COMPLETED_RUNS` | `1000` | Maximum number of completed runs to keep in memory |
+| `WORKFLOW_MAX_RUN_AGE` | `30` | Maximum age of runs to keep in database (days). Older runs are automatically deleted. |
+| `WORKFLOW_ENCRYPTION_KEY` | - | 32-character encryption key for encrypting secret inputs at rest |
+
+### Performance Optimizations
+
+The plugin includes several optimizations for fast startup, especially with large workflow histories:
+
+**Lazy Compilation**: Workflows are compiled on-demand when first accessed, not at startup. This dramatically reduces initialization time when you have many workflow definitions.
+
+**Background Loading**: Historical workflow runs are loaded in the background after initialization:
+- Active runs (pending, running, suspended) load immediately
+- Recent completed runs (most recent 100) load in the background
+- Older runs can be loaded on-demand with pagination
+
+**Automatic Cleanup**: Runs older than `maxRunAge` days are automatically deleted at midnight to prevent unbounded database growth. Only terminal-state runs (completed, failed, cancelled) are deleted; active workflows are preserved.
+
+**Memory Management**: The `maxCompletedRuns` setting limits how many completed runs are kept in memory. Older runs are automatically removed but remain accessible via database queries.
+
+**Database Optimization**: The plugin uses SQLite with WAL mode and composite indexes for optimal query performance.
+
+These optimizations ensure OpenCode starts instantly even with thousands of historical workflow runs.
 
 ### Structured Logging
 

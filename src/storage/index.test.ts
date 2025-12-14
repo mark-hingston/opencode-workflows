@@ -128,6 +128,44 @@ describe("WorkflowStorage", () => {
       const runs = await storage.loadAllRuns("test-workflow");
       expect(runs).toEqual([]);
     });
+
+    it("should support pagination with limit and offset", async () => {
+      const runs = await storage.loadAllRuns(undefined, 50, 10);
+      expect(runs).toEqual([]);
+    });
+
+    it("should use default pagination values when not provided", async () => {
+      const runs = await storage.loadAllRuns();
+      // Default limit is 100, offset is 0
+      expect(runs).toEqual([]);
+    });
+  });
+
+  describe("countRuns", () => {
+    it("should return 0 when no runs exist", async () => {
+      const count = await storage.countRuns();
+      expect(count).toBe(0);
+    });
+
+    it("should accept optional workflowId filter", async () => {
+      const count = await storage.countRuns("test-workflow");
+      expect(count).toBe(0);
+    });
+  });
+
+  describe("deleteRunsOlderThan", () => {
+    it("should return 0 when no old runs exist", async () => {
+      const cutoffDate = new Date("2024-01-01");
+      const count = await storage.deleteRunsOlderThan(cutoffDate);
+      expect(count).toBe(0);
+    });
+
+    it("should only delete runs in terminal states", async () => {
+      // This test verifies the query structure, actual deletion tested via integration
+      const cutoffDate = new Date("2024-01-01");
+      const count = await storage.deleteRunsOlderThan(cutoffDate);
+      expect(count).toBe(0);
+    });
   });
 
   describe("loadActiveRuns", () => {

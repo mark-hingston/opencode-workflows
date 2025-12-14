@@ -75,15 +75,7 @@ describe("WorkflowRunner", () => {
 
   describe("init", () => {
     it("should restore persisted runs from storage", async () => {
-      const persistedRuns: WorkflowRun[] = [
-        {
-          runId: "run-1",
-          workflowId: "test-workflow",
-          status: "completed",
-          inputs: {},
-          stepResults: {},
-          startedAt: new Date(),
-        },
+      const activeRuns: WorkflowRun[] = [
         {
           runId: "run-2",
           workflowId: "test-workflow",
@@ -93,14 +85,31 @@ describe("WorkflowRunner", () => {
           startedAt: new Date(),
         },
       ];
+      
+      const allRuns: WorkflowRun[] = [
+        {
+          runId: "run-1",
+          workflowId: "test-workflow",
+          status: "completed",
+          inputs: {},
+          stepResults: {},
+          startedAt: new Date(),
+        },
+        ...activeRuns,
+      ];
 
-      (mockStorage.loadAllRuns as ReturnType<typeof vi.fn>).mockResolvedValue(persistedRuns);
+      (mockStorage.loadActiveRuns as ReturnType<typeof vi.fn>).mockResolvedValue(activeRuns);
+      (mockStorage.loadAllRuns as ReturnType<typeof vi.fn>).mockResolvedValue(allRuns);
 
       await runner.init();
+      
+      // Wait for background loading to complete
+      await new Promise(resolve => setTimeout(resolve, 10));
 
+      expect(mockStorage.loadActiveRuns).toHaveBeenCalled();
       expect(mockStorage.loadAllRuns).toHaveBeenCalled();
       expect(mockLogger.info).toHaveBeenCalledWith(
-        "Restored 2 workflow run(s) from storage"
+        "Restored 1 active workflow run(s) from storage"
       );
     });
 
@@ -109,17 +118,21 @@ describe("WorkflowRunner", () => {
       await runnerNoStorage.init();
 
       expect(mockStorage.loadAllRuns).not.toHaveBeenCalled();
+      expect(mockStorage.loadActiveRuns).not.toHaveBeenCalled();
     });
 
     it("should log error when storage restore fails", async () => {
-      (mockStorage.loadAllRuns as ReturnType<typeof vi.fn>).mockRejectedValue(
+      (mockStorage.loadActiveRuns as ReturnType<typeof vi.fn>).mockRejectedValue(
         new Error("Storage error")
       );
 
       await runner.init();
+      
+      // Wait for background loading to complete
+      await new Promise(resolve => setTimeout(resolve, 10));
 
       expect(mockLogger.error).toHaveBeenCalledWith(
-        expect.stringContaining("Failed to restore runs from storage")
+        expect.stringContaining("Failed to restore active runs from storage")
       );
     });
   });

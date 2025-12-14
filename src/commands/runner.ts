@@ -130,16 +130,52 @@ export class WorkflowRunner {
   async init(): Promise<void> {
     if (!this.storage) return;
 
-    try {
-      // Load all runs from storage
-      const persistedRuns = await this.storage.loadAllRuns();
-      for (const run of persistedRuns) {
-        this.runs.set(run.runId, run);
-      }
-      this.log.info(`Restored ${persistedRuns.length} workflow run(s) from storage`);
-    } catch (error) {
-      this.log.error(`Failed to restore runs from storage: ${error}`);
-    }
+    // Load historical runs in the background to avoid blocking initialization
+    // This allows the plugin to start immediately while runs are being restored
+    this.loadHistoricalRunsInBackground();
+  }
+
+  /**
+   * Load historical workflow runs in the background without blocking initialization.
+   * Only active runs (pending, running, suspended) are loaded immediately.
+   * Recent completed runs are loaded asynchronously with pagination to avoid blocking startup.
+   */
+  private loadHistoricalRunsInBackground(): void {
+    if (!this.storage) return;
+
+    // Load active runs first (these are needed for resuming workflows)
+    this.storage
+      .loadActiveRuns()
+      .then((activeRuns) => {
+        for (const run of activeRuns) {
+          this.runs.set(run.runId, run);
+        }
+        this.log.info(`Restored ${activeRuns.length} active workflow run(s) from storage`);
+      })
+      .catch((error) => {
+        this.log.error(`Failed to restore active runs from storage: ${error}`);
+      });
+
+    // Load recent completed runs in background with pagination (non-blocking)
+    // Only load the most recent 100 runs to avoid memory issues with large histories
+    const RECENT_RUNS_LIMIT = 100;
+    this.storage
+      .loadAllRuns(undefined, RECENT_RUNS_LIMIT, 0)
+      .then((recentRuns) => {
+        let newCount = 0;
+        for (const run of recentRuns) {
+          if (!this.runs.has(run.runId)) {
+            this.runs.set(run.runId, run);
+            newCount++;
+          }
+        }
+        if (newCount > 0) {
+          this.log.debug(`Loaded ${newCount} recent historical run(s) in background`);
+        }
+      })
+      .catch((error) => {
+        this.log.error(`Failed to load historical runs: ${error}`);
+      });
   }
 
   /**
@@ -690,7 +726,28 @@ export class WorkflowRunner {
   }
 
   /**
-   * List all runs, optionally filtered by workflow ID
+   * Get run status by ID, loading from storage if not in memory.
+   * This is useful for accessing older runs that haven't been loaded yet.
+   */
+  async getStatusFromStorage(runId: string): Promise<WorkflowRun | undefined> {
+    // Check in-memory first
+    let run = this.runs.get(runId);
+    
+    if (!run && this.storage) {
+      // Try loading from storage
+      const loaded = await this.storage.loadRun(runId);
+      if (loaded) {
+        this.runs.set(runId, loaded);
+        run = loaded;
+      }
+    }
+    
+    return run;
+  }
+
+  /**
+   * List all runs, optionally filtered by workflow ID.
+   * Only returns runs currently in memory.
    */
   listRuns(workflowId?: string): WorkflowRun[] {
     const runs = Array.from(this.runs.values());
@@ -702,6 +759,51 @@ export class WorkflowRunner {
     }
 
     return runs.sort((a, b) => b.startedAt.getTime() - a.startedAt.getTime());
+  }
+
+  /**
+   * Load additional historical runs from storage with pagination.
+   * Useful for viewing older runs that weren't loaded at startup.
+   * 
+   * @param limit - Maximum number of runs to load (default: 100)
+   * @param offset - Number of runs to skip (default: 0)
+   * @param workflowId - Optional filter by workflow ID
+   * @returns The loaded runs
+   */
+  async loadMoreRuns(limit = 100, offset = 0, workflowId?: string): Promise<WorkflowRun[]> {
+    if (!this.storage) return [];
+
+    try {
+      const runs = await this.storage.loadAllRuns(workflowId, limit, offset);
+      
+      // Add to in-memory map
+      for (const run of runs) {
+        if (!this.runs.has(run.runId)) {
+          this.runs.set(run.runId, run);
+        }
+      }
+      
+      this.log.debug(`Loaded ${runs.length} additional run(s) from storage`);
+      return runs;
+    } catch (error) {
+      this.log.error(`Failed to load additional runs: ${error}`);
+      return [];
+    }
+  }
+
+  /**
+   * Get the total count of runs in storage, optionally filtered by workflow ID.
+   * Useful for pagination UI to show total pages.
+   */
+  async countStorageRuns(workflowId?: string): Promise<number> {
+    if (!this.storage) return 0;
+
+    try {
+      return await this.storage.countRuns(workflowId);
+    } catch (error) {
+      this.log.error(`Failed to count runs: ${error}`);
+      return 0;
+    }
   }
 
   /**
