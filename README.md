@@ -98,9 +98,9 @@ const logger = createLogger({
 Workflow runs are automatically persisted to a LibSQL (SQLite) database. This enables:
 
 - **Crash Recovery**: Active runs are restored on plugin restart
-- **Run History**: Query past workflow executions via `/workflow runs`
+- **Run History**: Query past workflow executions via the workflow tool (`mode=runs`, or `/workflow runs` if you've added a slash alias)
 - **Suspend/Resume**: Suspended workflows survive session restarts
-- **Session-aware progress**: Progress updates are routed to the originating session; if the chat is interrupted, workflows are suspended and can be resumed with `/workflow resume <runId>`
+- **Session-aware progress**: Progress updates are routed to the originating session; if the chat is interrupted, workflows are suspended and can be resumed with the workflow tool (`mode=resume`, or `/workflow resume <runId>` if you configured a slash alias)
 
 The database is created automatically at the configured `dbPath`.
 
@@ -404,13 +404,13 @@ This provides:
 When a workflow defines inputs, all inputs are **required by default**. If you try to run a workflow without providing all required inputs, the plugin will return a helpful error message listing the missing inputs:
 
 ```
-$ /workflow run deploy-prod
+$ workflow tool call (mode=run, workflowId=deploy-prod)
 
 Missing required input(s) for workflow **deploy-prod**:
 
 - **version** (string)
 
-Usage: `/workflow run deploy-prod version=<value>`
+Usage: supply `version` via the workflow tool (mode=run workflowId=deploy-prod params.version=<value>) or `/workflow run deploy-prod version=<value>` if you've configured a slash alias.
 ```
 
 This validation happens before the workflow starts, ensuring you don't waste time on a run that would fail due to missing inputs.
@@ -545,7 +545,12 @@ When a `resumeSchema` is defined:
 
 Supported schema types: `string`, `number`, `integer`, `boolean`, `array`, `object`
 
-Resume a workflow with data:
+Resume a workflow with data using the workflow tool:
+```json
+{ "mode": "resume", "runId": "<runId>", "resumeData": { "approved": true, "comment": "LGTM" } }
+```
+
+Slash alias (if configured):
 ```
 /workflow resume <runId> {"approved": true, "comment": "LGTM"}
 ```
@@ -759,20 +764,28 @@ Inputs and steps are frozen (immutable) within the script.
 
 ## Commands
 
-Use the `/workflow` command:
+Use the `workflow` tool. If you've registered slash aliases, the equivalent `/workflow ...` forms are shown in parentheses:
 
-- `/workflow list` - List available workflows
-- `/workflow show <id>` - Show workflow details
-- `/workflow graph <id>` - Show workflow DAG as Mermaid diagram
-- `/workflow run <id> [param=value ...]` - Run a workflow
-- `/workflow status <runId>` - Check run status
-- `/workflow resume <runId> [data]` - Resume a suspended workflow
-- `/workflow cancel <runId>` - Cancel a running workflow
-- `/workflow runs [workflowId]` - List recent runs
+- `mode=list` (`/workflow list`) - List available workflows
+- `mode=show workflowId=<id>` (`/workflow show <id>`) - Show workflow details
+- `mode=graph workflowId=<id>` (`/workflow graph <id>`) - Show workflow DAG as Mermaid diagram
+- `mode=run workflowId=<id> params...` (`/workflow run <id> [param=value ...]`) - Run a workflow
+- `mode=status runId=<runId>` (`/workflow status <runId>`) - Check run status
+- `mode=resume runId=<runId> resumeData...` (`/workflow resume <runId> [data]`) - Resume a suspended workflow
+- `mode=cancel runId=<runId>` (`/workflow cancel <runId>`) - Cancel a running workflow
+- `mode=runs [workflowId]` (`/workflow runs [workflowId]`) - List recent runs
 
 ### Visualizing Workflows
 
 The `graph` command generates a Mermaid diagram showing the workflow's step dependencies:
+
+Tool call:
+
+```json
+{ "mode": "graph", "workflowId": "deploy-prod" }
+```
+
+Slash alias (if configured):
 
 ```
 /workflow graph deploy-prod
@@ -828,7 +841,7 @@ Then you can invoke `/workflow-graph deploy-prod` or `/workflow-status 123` dire
 
 ### Parameter Type Inference
 
-When passing parameters via `/workflow run`, values are automatically converted to their appropriate types:
+When passing parameters via the workflow tool run mode (or `/workflow run` if you've set a slash alias), values are automatically converted to their appropriate types:
 
 | Input | Parsed As |
 |-------|-----------|
@@ -1156,7 +1169,12 @@ This example chains multiple specialized agents to review code from different pe
 
 > **Note**: This example assumes you have agents named `security-reviewer`, `performance-reviewer`, `quality-reviewer`, `tech-lead`, and `code-fixer` configured in OpenCode. Alternatively, you can use inline LLM calls with `system` prompts instead of named agents.
 
-Run it with:
+Run it with the workflow tool:
+```json
+{ "mode": "run", "workflowId": "code-review", "params": { "file": "src/api/auth.ts" } }
+```
+
+Or with a slash alias (if configured):
 ```
 /workflow run code-review file=src/api/auth.ts
 ```
