@@ -216,13 +216,21 @@ export async function cleanupAllProcesses(): Promise<void> {
  * These are logged as warnings but not blocked to maintain flexibility.
  */
 const SHELL_DANGEROUS_PATTERNS = [
-  /;\s*rm\s/i,      // rm after semicolon
-  /\|\s*sh\b/i,     // piping to shell
-  /\|\s*bash\b/i,   // piping to bash
-  /`[^`]+`/,        // backtick command substitution
-  /\$\([^)]+\)/,    // $() command substitution
-  />\s*\/etc\//i,   // writing to /etc
-  />\s*\/bin\//i,   // writing to /bin
+  /;\s*rm\s/i,        // rm after semicolon
+  /&&\s*rm\s/i,       // rm after &&
+  /\|\|\s*rm\s/i,     // rm after ||
+  /&\s*rm\s/i,        // rm after background operator
+  /\|\s*sh\b/i,       // piping to shell
+  /\|\s*bash\b/i,     // piping to bash
+  /\|\s*zsh\b/i,      // piping to zsh
+  /`[^`]+`/,          // backtick command substitution
+  /\$\([^)]+\)/,      // $() command substitution
+  /\$\{[^}]+\}/,      // ${} parameter expansion with commands
+  />\s*\/etc\//i,     // writing to /etc
+  />\s*\/bin\//i,     // writing to /bin
+  />\s*\/usr\/bin\//i, // writing to /usr/bin
+  /curl.*\|.*sh/i,    // curl piped to shell
+  /wget.*\|.*sh/i,    // wget piped to shell
 ];
 
 /**
@@ -1596,8 +1604,9 @@ function createSandboxContext(
 
   return {
     // Workflow context (read-only via frozen copies)
-    inputs: Object.freeze(JSON.parse(JSON.stringify(inputs))),
-    steps: Object.freeze(JSON.parse(JSON.stringify(steps))),
+    // Use structuredClone for better performance than JSON.parse(JSON.stringify())
+    inputs: Object.freeze(structuredClone(inputs)),
+    steps: Object.freeze(structuredClone(steps)),
     env: frozenEnv,
 
     // Console mapped to plugin logger (or silent if no logger provided)

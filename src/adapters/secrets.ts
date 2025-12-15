@@ -82,12 +82,12 @@ export interface EncryptedData {
  */
 export function isSecretExpression(expression: string, secretInputs: string[]): boolean {
   const trimmed = expression.trim();
-  
+
   // All environment variables are treated as secrets
   if (trimmed.startsWith("env.")) {
     return true;
   }
-  
+
   // Check if it's a secret input
   if (trimmed.startsWith("inputs.")) {
     const inputPath = trimmed.slice("inputs.".length);
@@ -95,7 +95,7 @@ export function isSecretExpression(expression: string, secretInputs: string[]): 
     const inputName = inputPath.split(".")[0];
     return secretInputs.includes(inputName);
   }
-  
+
   return false;
 }
 
@@ -109,14 +109,14 @@ export function isSecretExpression(expression: string, secretInputs: string[]): 
 export function extractSecretExpressions(template: string, secretInputs: string[]): string[] {
   const pattern = /\{\{([^}]+)\}\}/g;
   const secrets: string[] = [];
-  
+
   for (const match of template.matchAll(pattern)) {
     const expression = match[1].trim();
     if (isSecretExpression(expression, secretInputs)) {
       secrets.push(expression);
     }
   }
-  
+
   return secrets;
 }
 
@@ -148,12 +148,12 @@ export function maskSecretValue(value: string): string {
   if (!value || value.length === 0) {
     return SECRET_MASK;
   }
-  
+
   // For short values, completely mask
   if (value.length <= 4) {
     return SECRET_MASK;
   }
-  
+
   // For longer values, show first character + mask
   return value[0] + SECRET_MASK;
 }
@@ -172,18 +172,18 @@ export function maskInterpolatedString(
   secretValues: Map<string, string>
 ): string {
   let masked = interpolated;
-  
+
   // Sort by value length (longest first) to handle overlapping values correctly
   const sortedSecrets = Array.from(secretValues.entries())
     .sort(([, a], [, b]) => b.length - a.length);
-  
+
   for (const [, value] of sortedSecrets) {
     if (value && value.length > 0) {
       // Replace all occurrences of the secret value with the mask
       masked = masked.split(value).join(SECRET_MASK);
     }
   }
-  
+
   return masked;
 }
 
@@ -201,7 +201,7 @@ function validateEncryptionKey(encryptionKey: string): void {
   if (!encryptionKey || encryptionKey.length < MIN_KEY_LENGTH) {
     throw new Error(
       `Encryption key must be at least ${MIN_KEY_LENGTH} characters long for security. ` +
-      `Provided key is ${encryptionKey?.length || 0} characters.`
+      `Provided key does not meet security requirements.`
     );
   }
 }
@@ -229,22 +229,22 @@ function deriveKey(password: string, salt: Buffer): Buffer {
  */
 export function encryptForStorage(data: string, encryptionKey: string): EncryptedData {
   validateEncryptionKey(encryptionKey);
-  
+
   const salt = randomBytes(SALT_LENGTH);
   const key = deriveKey(encryptionKey, salt);
   const iv = randomBytes(IV_LENGTH);
-  
+
   const cipher = createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
   const encrypted = Buffer.concat([
     cipher.update(data, "utf8"),
     cipher.final(),
   ]);
-  
+
   const authTag = cipher.getAuthTag();
-  
+
   // Combine salt + iv + authTag + encrypted data
   const combined = Buffer.concat([salt, iv, authTag, encrypted]);
-  
+
   return {
     encrypted: true,
     data: combined.toString("base64"),
@@ -261,25 +261,25 @@ export function encryptForStorage(data: string, encryptionKey: string): Encrypte
  */
 export function decryptFromStorage(encryptedData: EncryptedData, encryptionKey: string): string {
   validateEncryptionKey(encryptionKey);
-  
+
   const combined = Buffer.from(encryptedData.data, "base64");
-  
+
   // Extract components
   const salt = combined.subarray(0, SALT_LENGTH);
   const iv = combined.subarray(SALT_LENGTH, SALT_LENGTH + IV_LENGTH);
   const authTag = combined.subarray(SALT_LENGTH + IV_LENGTH, SALT_LENGTH + IV_LENGTH + AUTH_TAG_LENGTH);
   const encrypted = combined.subarray(SALT_LENGTH + IV_LENGTH + AUTH_TAG_LENGTH);
-  
+
   const key = deriveKey(encryptionKey, salt);
-  
+
   const decipher = createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
   decipher.setAuthTag(authTag);
-  
+
   const decrypted = Buffer.concat([
     decipher.update(encrypted),
     decipher.final(),
   ]);
-  
+
   return decrypted.toString("utf8");
 }
 
@@ -315,7 +315,7 @@ export function encryptSecretInputs(
   encryptionKey: string
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  
+
   for (const [key, value] of Object.entries(inputs)) {
     if (secretKeys.includes(key) && value !== undefined && value !== null) {
       // Encrypt the secret value
@@ -325,7 +325,7 @@ export function encryptSecretInputs(
       result[key] = value;
     }
   }
-  
+
   return result;
 }
 
@@ -341,7 +341,7 @@ export function decryptSecretInputs(
   encryptionKey: string
 ): Record<string, unknown> {
   const result: Record<string, unknown> = {};
-  
+
   for (const [key, value] of Object.entries(inputs)) {
     if (isEncryptedData(value)) {
       try {
@@ -352,14 +352,16 @@ export function decryptSecretInputs(
         } catch {
           result[key] = decrypted;
         }
-      } catch {
-        // If decryption fails, keep the encrypted value
+      } catch (error) {
+        // Log warning for decryption failure - helps debug key rotation issues
+        console.warn(`[secrets] Failed to decrypt input '${key}': ${error instanceof Error ? error.message : 'Unknown error'}`);
+        // Keep the encrypted value to avoid data loss
         result[key] = value;
       }
     } else {
       result[key] = value;
     }
   }
-  
+
   return result;
 }

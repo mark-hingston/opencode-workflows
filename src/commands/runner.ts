@@ -201,10 +201,15 @@ export class WorkflowRunner {
         this.stopStatusInterval(runId);
         return;
       }
-      const totalSteps = Object.keys(run.stepResults || {}).length;
+      const completedSteps = Object.keys(run.stepResults || {}).length;
       const current = run.currentStepId ? `current: ${run.currentStepId}` : "current: n/a";
       const summary = this.progress?.getStepSummary(runId);
-      const msg = `Status: ${run.status} (${current}, completed steps: ${totalSteps})${summary ? ` • last: ${summary}` : ""}`;
+      // Get total steps from workflow definition if available
+      const compiled = this.factory.get(run.workflowId);
+      const totalSteps = compiled?.stepCount ?? 0;
+      const progressPct = totalSteps > 0 ? Math.round((completedSteps / totalSteps) * 100) : 0;
+      const progressStr = totalSteps > 0 ? ` (${completedSteps}/${totalSteps} steps, ${progressPct}%)` : ` (${completedSteps} steps completed)`;
+      const msg = `Status: ${run.status}${progressStr} • ${current}${summary ? ` • last: ${summary}` : ""}`;
       void this.progress?.emit(msg, { runId, level: "info", force: true });
     }, this.statusIntervalMs);
     this.statusIntervals.set(runId, interval);
@@ -258,8 +263,8 @@ export class WorkflowRunner {
       });
 
     // Load recent completed runs in background with pagination (non-blocking)
-    // Only load the most recent 100 runs to avoid memory issues with large histories
-    const RECENT_RUNS_LIMIT = 100;
+    // Only load the most recent 30 runs to reduce memory usage and startup time
+    const RECENT_RUNS_LIMIT = 30;
     this.storage
       .loadAllRuns(undefined, RECENT_RUNS_LIMIT, 0)
       .then((recentRuns) => {
@@ -367,12 +372,14 @@ export class WorkflowRunner {
    * @param steps - The cleanup step definitions to execute
    * @param run - The current workflow run (for context)
    * @param compiled - The compiled workflow result
+   * @param prefix - Prefix for step result keys ('onFailure' or 'finally')
    * @param errorInfo - Optional error information if this is an onFailure block
    */
   private async executeCleanupSteps(
     steps: StepDefinition[],
     run: WorkflowRun,
     compiled: WorkflowFactoryResult,
+    prefix: 'onFailure' | 'finally',
     errorInfo?: { message: string; stepId?: string }
   ): Promise<void> {
     const client = this.factory.getClient();
@@ -394,8 +401,9 @@ export class WorkflowRunner {
     };
 
     for (const stepDef of steps) {
+      const prefixedId = `${prefix}:${stepDef.id}`;
       try {
-        this.log.info(`Executing cleanup step: ${stepDef.id}`);
+        this.log.info(`Executing ${prefix} step: ${stepDef.id}`);
 
         const result = await executeInnerStep(
           stepDef,
@@ -407,22 +415,22 @@ export class WorkflowRunner {
         // Store the result for subsequent cleanup steps to reference
         ctx.steps[stepDef.id] = result;
 
-        // Save to run results with a "cleanup:" prefix to distinguish from main steps
-        run.stepResults[`cleanup:${stepDef.id}`] = {
-          stepId: `cleanup:${stepDef.id}`,
+        // Save to run results with prefix to distinguish cleanup type
+        run.stepResults[prefixedId] = {
+          stepId: prefixedId,
           status: "success",
           output: result as StepOutput,
           startedAt: new Date(),
           completedAt: new Date(),
         };
 
-        this.log.info(`Cleanup step ${stepDef.id} completed`);
+        this.log.info(`${prefix} step ${stepDef.id} completed`);
       } catch (error) {
         // Log but don't throw - cleanup steps should not mask the original error
-        this.log.error(`Cleanup step ${stepDef.id} failed: ${error}`);
+        this.log.error(`${prefix} step ${stepDef.id} failed: ${error}`);
 
-        run.stepResults[`cleanup:${stepDef.id}`] = {
-          stepId: `cleanup:${stepDef.id}`,
+        run.stepResults[prefixedId] = {
+          stepId: prefixedId,
           status: "failed",
           error: String(error),
           startedAt: new Date(),
@@ -724,6 +732,7 @@ export class WorkflowRunner {
         compiled.onFailureSteps,
         run,
         compiled,
+        'onFailure',
         { message: workflowError.message, stepId: failedStepId }
       );
     }
@@ -735,6 +744,7 @@ export class WorkflowRunner {
         compiled.finallySteps,
         run,
         compiled,
+        'finally',
         workflowError ? { message: workflowError.message, stepId: failedStepId } : undefined
       );
     }
@@ -953,6 +963,7 @@ export class WorkflowRunner {
         compiled.onFailureSteps,
         run,
         compiled,
+        'onFailure',
         { message: workflowError.message, stepId: failedStepId }
       );
     }
@@ -964,6 +975,7 @@ export class WorkflowRunner {
         compiled.finallySteps,
         run,
         compiled,
+        'finally',
         workflowError ? { message: workflowError.message, stepId: failedStepId } : undefined
       );
     }

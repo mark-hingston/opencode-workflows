@@ -37,6 +37,8 @@ export interface WorkflowFactoryResult {
   onFailureSteps?: StepDefinition[];
   /** Steps to execute after workflow completes (always runs) */
   finallySteps?: StepDefinition[];
+  /** Total number of steps in the workflow (for progress calculation) */
+  stepCount: number;
 }
 
 /**
@@ -132,23 +134,23 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
     const stack: Array<{ stepId: string; phase: "pre" | "post" }> = [
       { stepId: startStepId, phase: "pre" },
     ];
-    
+
     // Track steps currently being processed to detect cycles
     const inProgress = new Set<string>();
-    
+
     while (stack.length > 0) {
       const current = stack.pop();
       if (!current) break;
-      
+
       const { stepId, phase } = current;
-      
+
       // Check if already computed
       if (stepLevels.has(stepId)) {
         continue;
       }
-      
+
       const step = stepMap.get(stepId);
-      
+
       if (phase === "pre") {
         // First visit: push for post-processing and push dependencies
         if (!step?.after || step.after.length === 0) {
@@ -156,10 +158,10 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
           stepLevels.set(stepId, 0);
           continue;
         }
-        
+
         // Check if all dependencies are computed
         const allDepsComputed = step.after.every((dep) => stepLevels.has(dep));
-        
+
         if (allDepsComputed) {
           // Compute level from dependencies
           const maxDepLevel = Math.max(...step.after.map((dep) => stepLevels.get(dep) ?? 0));
@@ -168,7 +170,7 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
           // Push self for post-processing
           stack.push({ stepId, phase: "post" });
           inProgress.add(stepId);
-          
+
           // Push uncomputed dependencies
           for (const dep of step.after) {
             if (!stepLevels.has(dep) && !inProgress.has(dep)) {
@@ -179,7 +181,7 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
       } else {
         // Post-processing: all dependencies should now be computed
         inProgress.delete(stepId);
-        
+
         if (!step?.after || step.after.length === 0) {
           stepLevels.set(stepId, 0);
         } else {
@@ -188,7 +190,7 @@ function groupStepsByLevel(steps: StepDefinition[]): StepDefinition[][] {
         }
       }
     }
-    
+
     return stepLevels.get(startStepId) ?? 0;
   }
 
@@ -246,7 +248,7 @@ export function createWorkflowFromDefinition(
     commit: () => void;
   }
   let chain: ChainableWorkflow = workflow as ChainableWorkflow;
-  
+
   for (const level of stepLevels) {
     if (level.length === 1) {
       // Single step at this level - chain it
@@ -270,6 +272,7 @@ export function createWorkflowFromDefinition(
     secrets: definition.secrets,
     onFailureSteps: definition.onFailure,
     finallySteps: definition.finally,
+    stepCount: definition.steps.length,
   };
 }
 
@@ -280,7 +283,7 @@ export class WorkflowFactory {
   private compiledWorkflows = new Map<string, WorkflowFactoryResult>();
   private definitions = new Map<string, WorkflowDefinition>();
 
-  constructor(private client: OpencodeClient) {}
+  constructor(private client: OpencodeClient) { }
 
   /**
    * Get the OpenCode client instance.
@@ -315,7 +318,7 @@ export class WorkflowFactory {
   get(id: string): WorkflowFactoryResult | undefined {
     // Check if already compiled
     let compiled = this.compiledWorkflows.get(id);
-    
+
     if (!compiled) {
       // Lazy compile: check if we have a definition
       const definition = this.definitions.get(id);
@@ -323,7 +326,7 @@ export class WorkflowFactory {
         compiled = this.compile(definition);
       }
     }
-    
+
     return compiled;
   }
 

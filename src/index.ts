@@ -62,11 +62,19 @@ type SdkClient = PluginInput["client"];
 function createClientAdapter(client: SdkClient, progress?: ProgressReporter): OpencodeClient {
   // Cache for workflow sessions to avoid creating too many
   let workflowSessionId: string | null = null;
+  // Mutex to prevent race condition during session creation
+  let sessionCreationPromise: Promise<string> | null = null;
 
   /**
-   * Get or create a session for workflow agent invocations
+   * Get or create a session for workflow agent invocations.
+   * Uses a mutex pattern to prevent duplicate session creation from parallel calls.
    */
   async function getWorkflowSession(): Promise<string> {
+    // If session creation is in progress, wait for it
+    if (sessionCreationPromise) {
+      return sessionCreationPromise;
+    }
+
     if (workflowSessionId) {
       // Verify session still exists
       try {
@@ -80,17 +88,26 @@ function createClientAdapter(client: SdkClient, progress?: ProgressReporter): Op
       }
     }
 
-    // Create a new session for workflow operations
-    const result = await client.session.create({
-      body: { title: `Workflow Session - ${new Date().toISOString()}` },
-    });
+    // Use mutex to prevent parallel session creation
+    sessionCreationPromise = (async () => {
+      try {
+        // Create a new session for workflow operations
+        const result = await client.session.create({
+          body: { title: `Workflow Session - ${new Date().toISOString()}` },
+        });
 
-    if (!result.data?.id) {
-      throw new Error("Failed to create workflow session");
-    }
+        if (!result.data?.id) {
+          throw new Error("Failed to create workflow session");
+        }
 
-    workflowSessionId = result.data.id;
-    return workflowSessionId;
+        workflowSessionId = result.data.id;
+        return workflowSessionId;
+      } finally {
+        sessionCreationPromise = null;
+      }
+    })();
+
+    return sessionCreationPromise;
   }
 
   /**
@@ -336,6 +353,9 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     const dbPath = config.dbPath ?? resolve(projectDir, ".opencode/data/workflows.db");
     // Pass encryption key from config/env if available
     const encryptionKey = process.env.WORKFLOW_ENCRYPTION_KEY;
+    if (!encryptionKey) {
+      log.warn("WORKFLOW_ENCRYPTION_KEY not set - workflow secrets will NOT be encrypted at rest");
+    }
     state.storage = new WorkflowStorage({
       dbPath,
       verbose: config.verbose,
@@ -426,6 +446,14 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
           ) {
             log.info("Workflow file changed, reloading...");
 
+            // Notify user via progress reporter before reloading
+            if (state.progress) {
+              await state.progress.emit("Workflow files changed, reloading definitions...", {
+                level: "info",
+                force: true,
+              });
+            }
+
             // Close existing storage to prevent connection leaks
             if (state.storage) {
               await state.storage.close();
@@ -434,6 +462,14 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
             state.initialized = false;
             await initialize();
+
+            // Notify user that reload is complete
+            if (state.progress) {
+              await state.progress.emit(`Workflows reloaded: ${state.definitions.size} workflow(s) available`, {
+                level: "info",
+                force: true,
+              });
+            }
           }
 
           // Trigger file change workflows
