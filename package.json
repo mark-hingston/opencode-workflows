@@ -1,6 +1,6 @@
 {
   "name": "opencode-workflows",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Workflow automation plugin for OpenCode using Mastra engine",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
