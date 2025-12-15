@@ -453,6 +453,21 @@ export class WorkflowRunner {
       // Save all step results
       this.saveStepResults(run, result.steps || {});
       
+      // Check if any step failed - if so, treat as workflow failure
+      // This handles cases where Mastra catches step exceptions internally
+      // and returns a "completed" status with failed step results
+      const failedStepEntry = Object.entries(result.steps || {}).find(
+        ([, stepResult]) => stepResult?.status === "failed"
+      );
+      
+      if (failedStepEntry) {
+        const [failedStepId, failedStepResult] = failedStepEntry;
+        const errorMessage = failedStepResult?.output 
+          ? String(failedStepResult.output) 
+          : `Step '${failedStepId}' failed`;
+        throw new Error(errorMessage);
+      }
+      
       // Check if any step returned a dynamic workflow to execute
       // This enables "Agentic Planning" where an eval step can generate and execute a workflow
       const dynamicWorkflowStep = Object.entries(result.steps || {}).find(
@@ -634,6 +649,21 @@ export class WorkflowRunner {
 
       // Save step results from this execution
       this.saveStepResults(run, result.steps || {});
+
+      // Check if any step failed - if so, treat as workflow failure
+      // This handles cases where Mastra catches step exceptions internally
+      // and returns a "completed" status with failed step results
+      const failedStepEntry = Object.entries(result.steps || {}).find(
+        ([, stepResult]) => stepResult?.status === "failed"
+      );
+      
+      if (failedStepEntry) {
+        const [failedStepId, failedStepResult] = failedStepEntry;
+        const errorMessage = failedStepResult?.output 
+          ? String(failedStepResult.output) 
+          : `Step '${failedStepId}' failed`;
+        throw new Error(errorMessage);
+      }
 
       // Check if suspended again - no cleanup needed
       if (result.status === "suspended") {
