@@ -21,7 +21,147 @@ import type {
 import { JsonValueSchema } from "../types.js";
 import { interpolate, interpolateValue, interpolateWithSecrets } from "./interpolation.js";
 
-const execAsync = promisify(exec);
+import { spawn, type ChildProcess, type SpawnOptions } from "node:child_process";
+import treeKill from "tree-kill";
+
+// =============================================================================
+// Process Management
+// =============================================================================
+
+/** Set of currently running child processes for cleanup on cancellation */
+const activeProcesses = new Set<ChildProcess>();
+
+/**
+ * Kill a process tree gracefully, with fallback to SIGKILL.
+ * Ensures all child processes are terminated to prevent zombie processes.
+ */
+function killProcessTree(pid: number): Promise<void> {
+  return new Promise((resolve) => {
+    treeKill(pid, "SIGTERM", (err) => {
+      if (err) {
+        // Fallback to SIGKILL if SIGTERM fails
+        treeKill(pid, "SIGKILL", () => resolve());
+      } else {
+        resolve();
+      }
+    });
+  });
+}
+
+/**
+ * Execute a shell command using spawn with proper process cleanup.
+ * This replaces exec to provide better control over the child process lifecycle.
+ * 
+ * @param command - Command to execute (passed to shell)
+ * @param options - Execution options
+ * @param logger - Optional logger for streaming output
+ * @returns Promise with stdout, stderr, and exitCode
+ */
+async function executeCommand(
+  command: string,
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    timeout?: number;
+  } = {},
+  logger?: (msg: string, level: "info" | "warn" | "error") => void
+): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+  return new Promise((resolve, reject) => {
+    let child: ChildProcess;
+    
+    const spawnOptions: SpawnOptions = {
+      cwd: options.cwd,
+      env: options.env || process.env,
+    };
+    
+    // Use shell to interpret command (supports pipes, redirects, etc.)
+    const isWindows = process.platform === "win32";
+    const shell = isWindows ? "cmd.exe" : "/bin/sh";
+    const shellArgs = isWindows ? ["/c", command] : ["-c", command];
+    
+    child = spawn(shell, shellArgs, spawnOptions);
+    activeProcesses.add(child);
+    
+    let stdout = "";
+    let stderr = "";
+    let killed = false;
+    let timeoutId: NodeJS.Timeout | undefined;
+    
+    // Handle timeout
+    if (options.timeout && options.timeout > 0) {
+      timeoutId = setTimeout(async () => {
+        killed = true;
+        if (child.pid) {
+          await killProcessTree(child.pid);
+        }
+        reject(Object.assign(
+          new Error(`Command timed out after ${options.timeout}ms`),
+          { code: null, stdout, stderr, killed: true }
+        ));
+      }, options.timeout);
+    }
+    
+    child.stdout?.on("data", (data) => {
+      const chunk = data.toString();
+      stdout += chunk;
+      // Stream to logger if provided
+      if (logger && chunk.trim()) {
+        logger(chunk.trim(), "info");
+      }
+    });
+    
+    child.stderr?.on("data", (data) => {
+      const chunk = data.toString();
+      stderr += chunk;
+      // Stream stderr as info (or warn?) - usually workflow output is info
+      if (logger && chunk.trim()) {
+        logger(chunk.trim(), "info");
+      }
+    });
+    
+    child.on("error", (err) => {
+      if (timeoutId) clearTimeout(timeoutId);
+      activeProcesses.delete(child);
+      reject(err);
+    });
+    
+    child.on("close", (code, signal) => {
+      if (timeoutId) clearTimeout(timeoutId);
+      activeProcesses.delete(child);
+      
+      if (killed) return; // Already handled by timeout
+      
+      if (signal) {
+        reject(Object.assign(
+          new Error(`Command killed by signal: ${signal}`),
+          { code: null, stdout, stderr, signal }
+        ));
+      } else {
+        resolve({
+          stdout,
+          stderr,
+          exitCode: code ?? 0,
+        });
+      }
+    });
+  });
+}
+
+/**
+ * Kill all active child processes. Call this during workflow cancellation
+ * to prevent zombie processes.
+ */
+export async function cleanupAllProcesses(): Promise<void> {
+  const killPromises = Array.from(activeProcesses).map((child) => {
+    if (child.pid) {
+      return killProcessTree(child.pid);
+    }
+    return Promise.resolve();
+  });
+  await Promise.all(killPromises);
+  activeProcesses.clear();
+}
+
 
 // =============================================================================
 // Security Utilities
@@ -241,7 +381,12 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
       }
 
       try {
-        const { stdout, stderr } = await execAsync(command, options);
+        const { stdout, stderr } = await executeCommand(
+          command, 
+          options,
+          // Adapter to map simple log calls to client.app.log with explicit level
+          (msg, level) => client.app.log(msg, level)
+        );
         return {
           stdout: stdout.trim(),
           stderr: stderr.trim(),
@@ -252,7 +397,7 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
         
         if (def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${execError.code}: ${execError.stderr || execError.stdout}`
+            `Command failed: ${execError instanceof Error ? execError.message : String(execError)}`
           );
         }
 

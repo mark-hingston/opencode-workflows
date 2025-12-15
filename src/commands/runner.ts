@@ -3,6 +3,7 @@ import { MissingInputsError } from "../types.js";
 import type { WorkflowRun, Logger, WorkflowInputs, JsonValue, StepOutput, StepResult } from "../types.js";
 import type { WorkflowFactory, WorkflowFactoryResult } from "../factory/index.js";
 import type { WorkflowStorage } from "../storage/index.js";
+import { cleanupAllProcesses } from "../adapters/steps.js";
 
 /**
  * Configuration options for WorkflowRunner
@@ -53,13 +54,13 @@ interface MastraWorkflow {
  */
 function extractStepOutputs(stepResults: Record<string, StepResult>): Record<string, StepOutput> {
   const outputs: Record<string, StepOutput> = {};
-  
+
   for (const [stepId, result] of Object.entries(stepResults)) {
     if (result.status === "success" && result.output) {
       outputs[stepId] = result.output;
     }
   }
-  
+
   return outputs;
 }
 
@@ -77,17 +78,17 @@ interface TimeoutPromiseResult {
  */
 function createTimeoutPromise(timeoutMs: number, workflowId: string): TimeoutPromiseResult {
   let timeoutId: NodeJS.Timeout;
-  
+
   const promise = new Promise<never>((_, reject) => {
     timeoutId = setTimeout(() => {
       reject(new Error(`Workflow '${workflowId}' timed out after ${timeoutMs}ms`));
     }, timeoutMs);
   });
-  
+
   const clear = () => {
     clearTimeout(timeoutId);
   };
-  
+
   return { promise, clear };
 }
 
@@ -320,7 +321,7 @@ export class WorkflowRunner {
 
       // Save all step results
       this.saveStepResults(run, result.steps || {});
-      
+
       // Update final status
       run.status = "completed";
       run.completedAt = new Date();
@@ -362,7 +363,7 @@ export class WorkflowRunner {
     // Get the Mastra run instance
     let mastraRun = this.mastraRuns.get(runId);
     let needsHydration = false;
-    
+
     if (!mastraRun) {
       // Recreate the run if not in memory (e.g., after restart)
       // 
@@ -398,7 +399,7 @@ export class WorkflowRunner {
       if (needsHydration && Object.keys(run.stepResults).length > 0) {
         const previousOutputs = extractStepOutputs(run.stepResults);
         this.log.debug(`Hydrating run with ${Object.keys(previousOutputs).length} previous step outputs`);
-        
+
         // Start the workflow with hydrated step context
         // This primes the engine with knowledge of completed steps
         // Note: Depending on Mastra's implementation, this may or may not
@@ -471,6 +472,9 @@ export class WorkflowRunner {
 
     // Clean up Mastra run
     this.mastraRuns.delete(runId);
+
+    // Clean up any active child processes
+    await cleanupAllProcesses();
   }
 
   /**
