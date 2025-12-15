@@ -1026,7 +1026,7 @@ describe("Step Adapters", () => {
           step.execute({
             inputData: { inputs: {}, steps: {} },
           } as unknown as Parameters<typeof step.execute>[0])
-        ).rejects.toThrow("Agent 'unknown-agent' not found. Available agents: other-agent");
+        ).rejects.toThrow("Agent 'unknown-agent' not found.");
       });
 
       it("should throw error when no agents are available", async () => {

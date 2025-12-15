@@ -584,20 +584,27 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
           throw new Error("No agents available on the opencode client. Ensure agents are configured.");
         }
         
+        // Get the agent from the agents object (may be a Proxy)
         const agent = client.agents[def.agent];
         if (!agent) {
-          const availableAgents = Object.keys(client.agents).join(", ") || "(none)";
-          throw new Error(`Agent '${def.agent}' not found. Available agents: ${availableAgents}`);
+          throw new Error(`Agent '${def.agent}' not found.`);
         }
 
         client.app.log(`Invoking agent: ${def.agent}`, "info");
-        const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
-        const stepResult = { response: response.content };
-        return {
-          inputs: data.inputs || {},
-          steps: { ...ctx.steps, [def.id]: stepResult },
-          secretInputs,
-        };
+        
+        try {
+          const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
+          const stepResult = { response: response.content };
+          return {
+            inputs: data.inputs || {},
+            steps: { ...ctx.steps, [def.id]: stepResult },
+            secretInputs,
+          };
+        } catch (error) {
+          // Provide better error message for agent invocation failures
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to invoke agent '${def.agent}': ${errorMessage}`);
+        }
       }
 
       // Mode 2: Inline LLM call (legacy/fallback)
@@ -1196,13 +1203,18 @@ export async function executeInnerStep(
         
         const agent = client.agents[def.agent];
         if (!agent) {
-          const availableAgents = Object.keys(client.agents).join(", ") || "(none)";
-          throw new Error(`Agent '${def.agent}' not found. Available agents: ${availableAgents}`);
+          throw new Error(`Agent '${def.agent}' not found.`);
         }
         
         client.app.log(`Invoking agent: ${def.agent}`, "info");
-        const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
-        return { response: response.content };
+        
+        try {
+          const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
+          return { response: response.content };
+        } catch (error) {
+          const errorMessage = error instanceof Error ? error.message : String(error);
+          throw new Error(`Failed to invoke agent '${def.agent}': ${errorMessage}`);
+        }
       }
       
       client.app.log(`LLM prompt: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`, "info");

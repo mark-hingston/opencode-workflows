@@ -44,47 +44,162 @@ interface PluginState {
 }
 
 /**
+ * Type for the OpenCode SDK client
+ * The plugin receives the SDK client which has session-based APIs
+ */
+type SdkClient = PluginInput["client"];
+
+/**
  * Creates an OpenCode client adapter from the plugin context
  * 
- * Maps the plugin's client interface to our internal OpencodeClient interface
+ * Maps the plugin's client interface to our internal OpencodeClient interface.
+ * 
+ * For agent steps, we use the SDK's session.prompt() API with @agent mentions
+ * to invoke named agents. This creates a child session for each agent invocation.
  */
-function createClientAdapter(client: PluginInput["client"]): OpencodeClient {
+function createClientAdapter(client: SdkClient): OpencodeClient {
+  // Cache for workflow sessions to avoid creating too many
+  let workflowSessionId: string | null = null;
+  
+  /**
+   * Get or create a session for workflow agent invocations
+   */
+  async function getWorkflowSession(): Promise<string> {
+    if (workflowSessionId) {
+      // Verify session still exists
+      try {
+        const result = await client.session.get({ path: { id: workflowSessionId } });
+        if (result.data) {
+          return workflowSessionId;
+        }
+      } catch {
+        // Session no longer exists, create new one
+        workflowSessionId = null;
+      }
+    }
+    
+    // Create a new session for workflow operations
+    const result = await client.session.create({
+      body: { title: `Workflow Session - ${new Date().toISOString()}` },
+    });
+    
+    if (!result.data?.id) {
+      throw new Error("Failed to create workflow session");
+    }
+    
+    workflowSessionId = result.data.id;
+    return workflowSessionId;
+  }
+  
+  /**
+   * Invoke an agent using the SDK's session.prompt() API
+   * The agent is specified using @agentName mention syntax
+   */
+  async function invokeAgent(
+    agentName: string,
+    prompt: string,
+    _options?: { maxTokens?: number }
+  ): Promise<{ content: string }> {
+    const sessionId = await getWorkflowSession();
+    
+    // Use @agent mention to invoke the specific agent
+    // The prompt is prefixed with @agentName to route to that agent
+    const agentPrompt = `@${agentName} ${prompt}`;
+    
+    const result = await client.session.prompt({
+      path: { id: sessionId },
+      body: {
+        parts: [{ type: "text", text: agentPrompt }],
+      },
+    });
+    
+    // Extract the response content from the result
+    // The result contains the assistant's message parts
+    if (!result.data) {
+      throw new Error(`Agent '${agentName}' invocation failed: no response data`);
+    }
+    
+    // The response is in result.data.parts array
+    const parts = result.data.parts || [];
+    const textParts = parts
+      .filter((p: { type: string }) => p.type === "text")
+      .map((p: { type: string; text?: string }) => p.text || "");
+    
+    const content = textParts.join("\n");
+    
+    return { content };
+  }
+  
   return {
     // Pass through available tools from the Opencode client
-    tools: (client as { tools?: OpencodeClient["tools"] }).tools || {},
+    tools: (client as unknown as { tools?: OpencodeClient["tools"] }).tools || {},
+    
+    // Agents adapter - creates agents object dynamically
+    // Each agent invocation uses session.prompt() with @agent mention
+    agents: new Proxy({} as NonNullable<OpencodeClient["agents"]>, {
+      get(_target, agentName: string) {
+        // Return an agent object with invoke method
+        return {
+          invoke: async (prompt: string, options?: { maxTokens?: number }) => {
+            return invokeAgent(agentName, prompt, options);
+          },
+        };
+      },
+      has() {
+        // All agents are considered available - the SDK will error if agent doesn't exist
+        return true;
+      },
+    }),
+    
     llm: {
       chat: async (opts) => {
-        // Map the internal adapter call to the actual Opencode SDK
-        const llmClient = client as { llm?: { chat: (options: {
-          messages: Array<{ role: string; content: string }>;
-          model?: string;
-          maxTokens?: number;
-        }) => Promise<{ content?: string }> } };
+        // For direct LLM chat (not through a named agent), use session.prompt without @mention
+        const sessionId = await getWorkflowSession();
         
-        if (!llmClient.llm?.chat) {
-          throw new Error(
-            "LLM chat not available. Ensure the Opencode client provides llm.chat capability."
-          );
+        // Build prompt from messages
+        const systemMessage = opts.messages.find(m => m.role === "system");
+        const userMessages = opts.messages.filter(m => m.role === "user");
+        
+        // Combine into a single prompt
+        let prompt = "";
+        if (systemMessage) {
+          prompt += `[System Instructions]\n${systemMessage.content}\n\n`;
         }
+        prompt += userMessages.map(m => m.content).join("\n");
         
-        const response = await llmClient.llm.chat({
-          messages: opts.messages,
-          maxTokens: opts.maxTokens,
+        const result = await client.session.prompt({
+          path: { id: sessionId },
+          body: {
+            parts: [{ type: "text", text: prompt }],
+          },
         });
         
-        // Ensure we return the expected format
-        return { content: response.content || "" };
+        if (!result.data) {
+          throw new Error("LLM chat failed: no response data");
+        }
+        
+        const parts = result.data.parts || [];
+        const textParts = parts
+          .filter((p: { type: string }) => p.type === "text")
+          .map((p: { type: string; text?: string }) => p.text || "");
+        
+        return { content: textParts.join("\n") };
       },
     },
+    
     app: {
       log: (message, level = "info") => {
-        // Map to client.app.log if available, otherwise use console
-        const appClient = client as { app?: { log?: (message: string) => void } };
-        if (appClient.app?.log) {
-          appClient.app.log(`[workflow:${level}] ${message}`);
-        } else {
+        // Use the SDK's app.log API
+        client.app.log({
+          body: {
+            service: "workflow",
+            level,
+            message,
+          },
+        }).catch(() => {
+          // Fallback to console if SDK log fails
           console.log(`[workflow:${level}] ${message}`);
-        }
+        });
       },
     },
   };
