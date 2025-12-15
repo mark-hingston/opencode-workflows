@@ -98,6 +98,54 @@ describe("executeWorkflowTool", () => {
     });
   });
 
+  describe("graph mode", () => {
+    it("should generate a mermaid graph", async () => {
+      definitions.set("deploy", {
+        id: "deploy",
+        description: "Deploy workflow",
+        steps: [
+          { id: "build", type: "shell", command: "npm run build" },
+          { id: "deploy", type: "shell", command: "./deploy.sh", after: ["build"] },
+          { id: "notify", type: "agent", agent: "ops", prompt: "Deployment done", after: ["deploy"] },
+        ],
+      });
+
+      const result = await executeWorkflowTool(
+        { mode: "graph", workflowId: "deploy" },
+        definitions,
+        mockRunner
+      );
+
+      expect(result.success).toBe(true);
+      expect(result.graph).toContain("```mermaid");
+      expect(result.message).toContain("graph TD");
+      expect(result.message).toContain("build --> deploy");
+      expect(result.message).toContain("deploy --> notify");
+    });
+
+    it("should return error when workflowId is missing", async () => {
+      const result = await executeWorkflowTool(
+        { mode: "graph" },
+        definitions,
+        mockRunner
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("workflowId is required");
+    });
+
+    it("should return error for unknown workflow", async () => {
+      const result = await executeWorkflowTool(
+        { mode: "graph", workflowId: "unknown" },
+        definitions,
+        mockRunner
+      );
+
+      expect(result.success).toBe(false);
+      expect(result.message).toContain("Workflow not found");
+    });
+  });
+
   describe("run mode", () => {
     it("should start a workflow", async () => {
       const result = await executeWorkflowTool(
@@ -379,6 +427,14 @@ describe("WorkflowToolSchema", () => {
     expect(result.success).toBe(true);
   });
 
+  it("should validate graph input", () => {
+    const result = WorkflowToolSchema.safeParse({
+      mode: "graph",
+      workflowId: "deploy",
+    });
+    expect(result.success).toBe(true);
+  });
+
   it("should validate valid resume input with resumeData", () => {
     const result = WorkflowToolSchema.safeParse({
       mode: "resume",
@@ -414,6 +470,7 @@ describe("getWorkflowToolDefinition", () => {
     expect(def.name).toBe("workflow");
     expect(def.description).toContain("Execute and manage workflow automation");
     expect(def.description).toContain("list");
+    expect(def.description).toContain("graph");
     expect(def.description).toContain("run");
     expect(def.description).toContain("resume");
     expect(def.args).toBe(WorkflowToolSchema);

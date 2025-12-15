@@ -795,6 +795,37 @@ Different step types are shown with distinct shapes:
 - **Stadium** `([...])` - suspend steps (human-in-the-loop)
 - **Hexagon** `{{...}}` - agent steps (LLM calls)
 
+### Optional: Register Slash Commands
+
+You can predefine shortcuts in your `opencode.jsonc` so you don't have to remember full prompts:
+
+```jsonc
+// opencode.jsonc or ~/.config/opencode/opencode.jsonc
+{
+  "plugin": ["opencode-workflows@latest"],
+  "command": {
+    "workflow-list": {
+      "template": "Use the workflow tool with mode=list",
+      "description": "List all workflows"
+    },
+    "workflow-graph": {
+      "template": "Use the workflow tool with mode=graph and workflowId=$ARGUMENTS",
+      "description": "Show a workflow DAG as Mermaid"
+    },
+    "workflow-run": {
+      "template": "Use the workflow tool with mode=run and workflowId=$ARGUMENTS",
+      "description": "Start a workflow run"
+    },
+    "workflow-status": {
+      "template": "Use the workflow tool with mode=status and runId=$ARGUMENTS",
+      "description": "Check workflow run status"
+    }
+  }
+}
+```
+
+Then you can invoke `/workflow-graph deploy-prod` or `/workflow-status 123` directly in OpenCode.
+
 ### Parameter Type Inference
 
 When passing parameters via `/workflow run`, values are automatically converted to their appropriate types:

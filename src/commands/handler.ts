@@ -124,7 +124,7 @@ function formatWorkflowDetails(def: WorkflowDefinition): string {
 /**
  * Generate a Mermaid diagram representing the workflow DAG
  */
-function generateMermaidGraph(def: WorkflowDefinition): string {
+export function generateMermaidGraph(def: WorkflowDefinition): string {
   const lines = ["graph TD"];
 
   // Add nodes with appropriate shapes based on step type

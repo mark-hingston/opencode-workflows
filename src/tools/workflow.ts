@@ -2,6 +2,7 @@ import { z } from "zod";
 import type { WorkflowDefinition, WorkflowRun, InputValue, JsonValue, RunContext } from "../types.js";
 import { JsonValueSchema } from "../types.js";
 import type { WorkflowRunner } from "../commands/runner.js";
+import { generateMermaidGraph } from "../commands/handler.js";
 
 /**
  * Schema for workflow input parameters
@@ -13,12 +14,12 @@ const InputValueSchema = z.union([z.string(), z.number(), z.boolean()]);
  */
 export const WorkflowToolSchema = z.object({
   mode: z
-    .enum(["list", "show", "run", "status", "resume", "cancel", "runs"])
+    .enum(["list", "show", "run", "status", "resume", "cancel", "runs", "graph"])
     .describe("The operation to perform"),
   workflowId: z
     .string()
     .optional()
-    .describe("Workflow ID (required for show, run)"),
+    .describe("Workflow ID (required for show, run, graph)"),
   runId: z
     .string()
     .optional()
@@ -45,6 +46,7 @@ export interface WorkflowToolResult {
   runs?: WorkflowRun[];
   run?: WorkflowRun;
   runId?: string;
+  graph?: string;
 }
 
 /**
@@ -121,6 +123,31 @@ export async function executeWorkflowTool(
           message: `Failed to start workflow: ${error}`,
         };
       }
+    }
+
+    case "graph": {
+      if (!input.workflowId) {
+        return {
+          success: false,
+          message: "workflowId is required for 'graph' mode",
+        };
+      }
+
+      const workflow = definitions.get(input.workflowId);
+      if (!workflow) {
+        return {
+          success: false,
+          message: `Workflow not found: ${input.workflowId}`,
+        };
+      }
+
+      const graph = generateMermaidGraph(workflow);
+      return {
+        success: true,
+        message: graph,
+        workflow,
+        graph,
+      };
     }
 
     case "status": {
@@ -220,6 +247,7 @@ export function getWorkflowToolDefinition() {
 Modes:
 - list: List all available workflows
 - show: Get details of a specific workflow (requires workflowId)
+- graph: Generate a Mermaid DAG for a workflow (requires workflowId)
 - run: Execute a workflow (requires workflowId, optional params)
 - status: Check the status of a workflow run (requires runId)
 - resume: Resume a suspended workflow (requires runId, optional resumeData)
