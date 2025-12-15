@@ -112,21 +112,44 @@ async function executeCommand(
       }, options.timeout);
     }
 
+    let stdoutBuffer = "";
+    let stderrBuffer = "";
+
     child.stdout?.on("data", (data) => {
       const chunk = data.toString();
       stdout += chunk;
-      // Stream to logger if provided
-      if (logger && chunk.trim()) {
-        logger(chunk.trim(), "info");
+
+      // Stream to logger if provided (with line buffering)
+      if (logger) {
+        stdoutBuffer += chunk;
+        const lines = stdoutBuffer.split("\n");
+        // Keep the last part (it might be a partial line)
+        stdoutBuffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.trim()) {
+            logger(line.trim(), "info");
+          }
+        }
       }
     });
 
     child.stderr?.on("data", (data) => {
       const chunk = data.toString();
       stderr += chunk;
-      // Stream stderr as info (or warn?) - usually workflow output is info
-      if (logger && chunk.trim()) {
-        logger(chunk.trim(), "info");
+
+      // Stream stderr as info (with line buffering)
+      if (logger) {
+        stderrBuffer += chunk;
+        const lines = stderrBuffer.split("\n");
+        // Keep the last part (it might be a partial line)
+        stderrBuffer = lines.pop() || "";
+
+        for (const line of lines) {
+          if (line.trim()) {
+            logger(line.trim(), "info");
+          }
+        }
       }
     });
 
@@ -139,6 +162,16 @@ async function executeCommand(
     child.on("close", (code, signal) => {
       if (timeoutId) clearTimeout(timeoutId);
       activeProcesses.delete(child);
+
+      // Flush remaining buffers
+      if (logger) {
+        if (stdoutBuffer.trim()) {
+          logger(stdoutBuffer.trim(), "info");
+        }
+        if (stderrBuffer.trim()) {
+          logger(stderrBuffer.trim(), "info");
+        }
+      }
 
       if (killed) return; // Already handled by timeout
 

@@ -47,7 +47,7 @@ export class ProgressReporter {
   constructor(
     private client: ProgressClient,
     private log: Logger
-  ) {}
+  ) { }
 
   setRunContext(runId: string, context?: RunContext): void {
     if (!context) return;
@@ -74,21 +74,30 @@ export class ProgressReporter {
     const prefix = runId ? `[workflow:${runId}] ` : "[workflow] ";
     const finalMessage = `${prefix}${stepPrefix}${safeMessage}`;
 
-    // Always log to the plugin logger for server-side visibility
-    const loggerFn = this.log[level].bind(this.log) as (msg: string) => void;
-    loggerFn(finalMessage);
+    let loggedToApp = false;
 
     // Try to log via the client app channel (best effort)
-    try {
-      await Promise.resolve(this.client.app.log({
-        body: {
-          service: "workflow",
-          level,
-          message: finalMessage,
-        },
-      }));
-    } catch {
-      // Swallow to avoid breaking execution on logging failures
+    // This is the preferred way to log in a session context as it integrates with the TUI
+    if (this.client.app?.log) {
+      try {
+        await Promise.resolve(this.client.app.log({
+          body: {
+            service: "workflow",
+            level,
+            message: finalMessage,
+          },
+        }));
+        loggedToApp = true;
+      } catch {
+        // Swallow to avoid breaking execution on logging failures
+      }
+    }
+
+    // Only fallback to direct console logging if we couldn't log to the app
+    // This prevents "mashed" output where console logs interfere with TUI/Agent streaming
+    if (!loggedToApp) {
+      const loggerFn = this.log[level].bind(this.log) as (msg: string) => void;
+      loggerFn(finalMessage);
     }
 
     if (!runId) return;

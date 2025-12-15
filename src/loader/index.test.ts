@@ -745,7 +745,7 @@ steps:
     });
 
     it("should log info messages", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger();
 
       logger.info("test message");
@@ -755,7 +755,7 @@ steps:
     });
 
     it("should log warn messages", () => {
-      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
       const logger = createLogger();
 
       logger.warn("warning message");
@@ -765,7 +765,7 @@ steps:
     });
 
     it("should log error messages", () => {
-      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "error").mockImplementation(() => { });
       const logger = createLogger();
 
       logger.error("error message");
@@ -775,7 +775,7 @@ steps:
     });
 
     it("should not log debug messages when verbose is false", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger(false);
 
       logger.debug("debug message");
@@ -785,7 +785,7 @@ steps:
     });
 
     it("should log debug messages when verbose is true", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger(true);
 
       logger.debug("debug message");
@@ -795,7 +795,7 @@ steps:
     });
 
     it("should accept LoggerOptions object", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger({ verbose: true });
 
       logger.debug("debug message");
@@ -805,7 +805,7 @@ steps:
     });
 
     it("should output JSON format when format is json", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger({ format: "json" });
 
       logger.info("test message");
@@ -822,7 +822,7 @@ steps:
     });
 
     it("should include context in JSON output", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger({ format: "json" });
 
       logger.info("workflow started", {
@@ -844,7 +844,7 @@ steps:
     });
 
     it("should include context in text format", () => {
-      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => {});
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
       const logger = createLogger({ format: "text" });
 
       logger.info("step complete", {
@@ -907,7 +907,7 @@ steps:
     });
 
     it("should use console.error for error level in JSON format", () => {
-      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+      const errorSpy = vi.spyOn(console, "error").mockImplementation(() => { });
       const logger = createLogger({ format: "json" });
 
       logger.error("something went wrong");
@@ -919,7 +919,7 @@ steps:
     });
 
     it("should use console.warn for warn level in JSON format", () => {
-      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => { });
       const logger = createLogger({ format: "json" });
 
       logger.warn("be careful");
@@ -928,6 +928,92 @@ steps:
       const parsed = JSON.parse(warnSpy.mock.calls[0][0]);
       expect(parsed.level).toBe("warn");
       warnSpy.mockRestore();
+    });
+    it("should suppress console output when console is false", () => {
+      const consoleSpy = vi.spyOn(console, "log").mockImplementation(() => { });
+      const logger = createLogger({ console: false });
+
+      logger.info("should not be logged");
+
+      expect(consoleSpy).not.toHaveBeenCalled();
+      consoleSpy.mockRestore();
+    });
+  });
+
+  // =============================================================================
+  // Implicit Sequential Execution Tests
+  // =============================================================================
+  describe("Implicit Sequential Execution", () => {
+    it("should enforce sequential execution when dependencies are missing", async () => {
+      const sequentialWorkflow = {
+        id: "sequential",
+        steps: [
+          { id: "step1", type: "shell", command: "echo 1" },
+          { id: "step2", type: "shell", command: "echo 2" }, // Should depend on step1
+          { id: "step3", type: "shell", command: "echo 3" }, // Should depend on step2
+        ],
+      };
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("seq.json", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(sequentialWorkflow));
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+      const wf = result.workflows.get("sequential");
+
+      expect(wf).toBeDefined();
+      expect(wf?.steps[0].after).toEqual([]); // First step has no deps
+      expect(wf?.steps[1].after).toEqual(["step1"]); // Step 2 after Step 1
+      expect(wf?.steps[2].after).toEqual(["step2"]); // Step 3 after Step 2
+    });
+
+    it("should respect explicit parallel execution (empty after array)", async () => {
+      const parallelWorkflow = {
+        id: "parallel",
+        steps: [
+          { id: "step1", type: "shell", command: "echo 1" },
+          { id: "step2", type: "shell", command: "echo 2", after: [] }, // Explicitly no deps
+        ],
+      };
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("parallel.json", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(parallelWorkflow));
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+      const wf = result.workflows.get("parallel");
+
+      expect(wf).toBeDefined();
+      expect(wf?.steps[0].after).toEqual([]);
+      expect(wf?.steps[1].after).toEqual([]); // Should remain empty
+    });
+
+    it("should mix implicit and explicit dependencies", async () => {
+      const mixedWorkflow = {
+        id: "mixed",
+        steps: [
+          { id: "step1", type: "shell", command: "echo 1" },
+          { id: "step2", type: "shell", command: "echo 2" }, // Implicit: after step1
+          { id: "step3", type: "shell", command: "echo 3", after: ["step1"] }, // Explicit: after step1 (parallel with step2)
+        ],
+      };
+
+      vi.mocked(stat).mockResolvedValue(mockStats(true) as never);
+      vi.mocked(readdir).mockResolvedValue([
+        mockDirent("mixed.json", true),
+      ] as never);
+      vi.mocked(readFile).mockResolvedValue(JSON.stringify(mixedWorkflow));
+
+      const result = await loadWorkflows("/project", mockLogger, [".workflows"]);
+      const wf = result.workflows.get("mixed");
+
+      expect(wf).toBeDefined();
+      expect(wf?.steps[1].after).toEqual(["step1"]);
+      expect(wf?.steps[2].after).toEqual(["step1"]);
     });
   });
 });

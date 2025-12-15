@@ -112,7 +112,7 @@ async function loadDataWorkflow(
   try {
     const content = await readFile(filePath, "utf-8");
     const ext = extname(filePath).toLowerCase();
-    
+
     let parsed: unknown;
 
     if (ext === ".yaml" || ext === ".yml") {
@@ -137,9 +137,27 @@ async function loadDataWorkflow(
 
     const workflow = result.data;
 
-    // Validate step dependencies
+    // Validate step dependencies and enforce strict sequential execution
+    // unless explicit parallel execution is requested via empty "after" array.
     const stepIds = new Set(workflow.steps.map((s) => s.id));
-    for (const step of workflow.steps) {
+
+    for (let i = 0; i < workflow.steps.length; i++) {
+      const step = workflow.steps[i];
+
+      // If "after" is not defined at all, imply dependency on the previous step
+      // This makes the list sequential by default (top-to-bottom execution)
+      if (typeof step.after === "undefined") {
+        if (i > 0) {
+          // Determine previous step to depend on
+          const prevStep = workflow.steps[i - 1];
+          step.after = [prevStep.id];
+        } else {
+          // First step has no dependencies
+          step.after = [];
+        }
+      }
+
+      // Validate explicit dependencies
       if (step.after) {
         for (const dep of step.after) {
           if (!stepIds.has(dep)) {
@@ -217,12 +235,12 @@ async function loadTsWorkflow(
   try {
     // Use jiti to import the TypeScript/JavaScript file
     const module = await jiti.import(filePath);
-    
+
     // Get the default export (handles both ESM and CJS)
     const exported = (module as { default?: unknown }).default ?? module;
-    
+
     let workflow: unknown;
-    
+
     // If the export is a function, call it to get the workflow definition
     if (typeof exported === "function") {
       log.debug(`Workflow file exports a function, executing it: ${filePath}`);
@@ -230,10 +248,10 @@ async function loadTsWorkflow(
     } else {
       workflow = exported;
     }
-    
+
     // Validate against schema
     const result = WorkflowDefinitionSchema.safeParse(workflow);
-    
+
     if (!result.success) {
       log.error(`Invalid workflow schema in ${filePath}:`);
       for (const issue of result.error.issues) {
@@ -241,9 +259,9 @@ async function loadTsWorkflow(
       }
       return null;
     }
-    
+
     const validatedWorkflow = result.data;
-    
+
     // Validate step dependencies
     const stepIds = new Set(validatedWorkflow.steps.map((s) => s.id));
     for (const step of validatedWorkflow.steps) {
@@ -258,18 +276,18 @@ async function loadTsWorkflow(
         }
       }
     }
-    
+
     // Check for circular dependencies
     if (hasCircularDependencies(validatedWorkflow.steps)) {
       log.error(`Circular dependencies detected in ${filePath}`);
       return null;
     }
-    
+
     // Use filename as ID if not provided
     if (!validatedWorkflow.id) {
       validatedWorkflow.id = basename(filePath, extname(filePath));
     }
-    
+
     return validatedWorkflow as WorkflowDefinition;
   } catch (error) {
     log.error(`Failed to load TypeScript workflow ${filePath}: ${error}`);
@@ -445,13 +463,15 @@ export async function loadWorkflows(
  *   output: (entry) => sendToLogAggregator(entry)
  * });
  */
+// LoggerOptions is imported from types.ts
+
 export function createLogger(options: LoggerOptions | boolean = {}): Logger {
   // Handle legacy boolean parameter for backwards compatibility
-  const opts: LoggerOptions = typeof options === 'boolean' 
-    ? { verbose: options } 
+  const opts: LoggerOptions = typeof options === 'boolean'
+    ? { verbose: options }
     : options;
-  
-  const { verbose = false, format = "text", output } = opts;
+
+  const { verbose = false, format = "text", output, console: enableConsole = true } = opts;
 
   /**
    * Emit a log entry using the configured format and output
@@ -475,24 +495,26 @@ export function createLogger(options: LoggerOptions | boolean = {}): Logger {
     }
 
     // Format and output based on configuration
-    if (format === "json") {
-      // Structured JSON output for log aggregation/parsing
-      const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-      logFn(JSON.stringify(entry));
-    } else {
-      // Human-readable text format
-      const contextParts = [
-        entry.workflowId && `workflow=${entry.workflowId}`,
-        entry.runId && `run=${entry.runId.slice(0, 8)}`,
-        entry.stepId && `step=${entry.stepId}`,
-        entry.durationMs !== undefined && `duration=${entry.durationMs}ms`,
-      ].filter(Boolean);
+    if (enableConsole) {
+      if (format === "json") {
+        // Structured JSON output for log aggregation/parsing
+        const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+        logFn(JSON.stringify(entry));
+      } else {
+        // Human-readable text format
+        const contextParts = [
+          entry.workflowId && `workflow=${entry.workflowId}`,
+          entry.runId && `run=${entry.runId.slice(0, 8)}`,
+          entry.stepId && `step=${entry.stepId}`,
+          entry.durationMs !== undefined && `duration=${entry.durationMs}ms`,
+        ].filter(Boolean);
 
-      const contextStr = contextParts.length > 0 ? ` [${contextParts.join(" ")}]` : "";
-      const prefix = `[workflow] [${level.toUpperCase()}]`;
-      
-      const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
-      logFn(`${prefix}${contextStr} ${message}`);
+        const contextStr = contextParts.length > 0 ? ` [${contextParts.join(" ")}]` : "";
+        const prefix = `[workflow] [${level.toUpperCase()}]`;
+
+        const logFn = level === "error" ? console.error : level === "warn" ? console.warn : console.log;
+        logFn(`${prefix}${contextStr} ${message}`);
+      }
     }
   };
 

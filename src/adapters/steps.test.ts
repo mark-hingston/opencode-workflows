@@ -16,7 +16,7 @@ const { mockSpawn, createMockProcess } = vi.hoisted(() => {
     process.pid = 12345;
     return process;
   };
-  
+
   return {
     mockSpawn: vi.fn(),
     createMockProcess,
@@ -95,7 +95,7 @@ function getStepOutput<T = JsonValue>(context: StepContext, stepId: string): T {
 // Helper to simulate successful spawn execution
 function mockSpawnSuccess(stdout: string, stderr = "") {
   currentMockProcess = createMockProcess();
-  
+
   // Simulate async behavior - emit data and close after a microtask
   setImmediate(() => {
     if (currentMockProcess) {
@@ -108,7 +108,7 @@ function mockSpawnSuccess(stdout: string, stderr = "") {
 
 function mockSpawnError(code: number, stderr: string, stdout = "") {
   currentMockProcess = createMockProcess();
-  
+
   setImmediate(() => {
     if (currentMockProcess) {
       if (stdout) currentMockProcess.stdout.emit("data", stdout);
@@ -322,7 +322,7 @@ describe("Step Adapters", () => {
         // Verify the step has a resumeSchema property set
         // (Mastra will use this for automatic validation)
         expect(step).toBeDefined();
-        
+
         // Valid resume data should work
         const result = await step.execute({
           inputData: { inputs: {}, steps: {} },
@@ -616,6 +616,71 @@ describe("Step Adapters", () => {
       });
     });
 
+    describe("output buffering", () => {
+      it("should buffer output by lines to prevent interleaved logs", async () => {
+        // Create a custom mock process for this test
+        currentMockProcess = createMockProcess();
+
+        const step = createShellStep(
+          { id: "cmd", type: "shell", command: "echo-chunks" },
+          mockClient
+        );
+
+        // Start execution - it effectively waits for process completion
+        const executePromise = step.execute({
+          inputData: { inputs: {}, steps: {} },
+        } as unknown as Parameters<typeof step.execute>[0]);
+
+        // Simulate partial chunks
+        setImmediate(() => {
+          if (currentMockProcess) {
+            // Chunk 1: Partial line
+            currentMockProcess.stdout.emit("data", "Counting obj");
+
+            // Check that it hasn't been logged yet (should be buffered)
+            // Note: This assertion is tricky because execute is async, but we can check if log was called
+            // However, since we can't await the intermediate state easily in this test structure, 
+            // we'll rely on the sequence of calls at the end.
+
+            // Chunk 2: Rest of line + start of next
+            currentMockProcess.stdout.emit("data", "ects: 100% (5/5), done.\nDelta compression");
+
+            // Chunk 3: Rest of second line + newline
+            currentMockProcess.stdout.emit("data", " using up to 8 threads\n");
+
+            currentMockProcess.emit("close", 0, null);
+          }
+        });
+
+        await executePromise;
+
+        // Verify logger was called with complete lines only
+        // The mockClient.app.log calls should correspond to the complete lines
+
+        // Expected calls:
+        // 1. "> echo-chunks" (command log)
+        // 2. "Counting objects: 100% (5/5), done." (first complete line)
+        // 3. "Delta compression using up to 8 threads" (second complete line)
+
+        // We filter for info logs that come from stdout
+        const logCalls = vi.mocked(mockClient.app.log).mock.calls
+          .filter(args => args[1] === "info" && !args[0].startsWith(">"));
+
+        // With buffering, we expect exact line matches
+        // Without buffering, we'd see partials like "Counting obj"
+
+        const loggedMessages = logCalls.map(args => args[0]);
+
+        // Check for the presence of the complete assembled lines
+        expect(loggedMessages).toContain("Counting objects: 100% (5/5), done.");
+        expect(loggedMessages).toContain("Delta compression using up to 8 threads");
+
+        // Ensure no partial fragments were logged as separate lines
+        expect(loggedMessages).not.toContain("Counting obj");
+        expect(loggedMessages).not.toContain("Delta compression");
+      });
+    });
+
     describe("condition evaluation", () => {
       it("should skip execution when condition is false", async () => {
         const step = createShellStep(
@@ -686,12 +751,12 @@ describe("Step Adapters", () => {
       it("should use spawn without shell when safe=true", async () => {
         mockSpawnSuccess("safe output");
         const step = createShellStep(
-          { 
-            id: "safe-cmd", 
-            type: "shell", 
-            command: "echo", 
-            safe: true, 
-            args: ["hello", "{{inputs.name}}"] 
+          {
+            id: "safe-cmd",
+            type: "shell",
+            command: "echo",
+            safe: true,
+            args: ["hello", "{{inputs.name}}"]
           },
           mockClient
         );
@@ -712,11 +777,11 @@ describe("Step Adapters", () => {
       it("should throw if args are missing in safe mode", async () => {
         const step = createShellStep(
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          { 
-            id: "invalid-safe", 
-            type: "shell", 
-            command: "echo", 
-            safe: true 
+          {
+            id: "invalid-safe",
+            type: "shell",
+            command: "echo",
+            safe: true
             // args missing - invalid config
           } as unknown as Parameters<typeof createShellStep>[0],
           mockClient

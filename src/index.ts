@@ -62,7 +62,7 @@ type SdkClient = PluginInput["client"];
 function createClientAdapter(client: SdkClient, progress?: ProgressReporter): OpencodeClient {
   // Cache for workflow sessions to avoid creating too many
   let workflowSessionId: string | null = null;
-  
+
   /**
    * Get or create a session for workflow agent invocations
    */
@@ -79,20 +79,20 @@ function createClientAdapter(client: SdkClient, progress?: ProgressReporter): Op
         workflowSessionId = null;
       }
     }
-    
+
     // Create a new session for workflow operations
     const result = await client.session.create({
       body: { title: `Workflow Session - ${new Date().toISOString()}` },
     });
-    
+
     if (!result.data?.id) {
       throw new Error("Failed to create workflow session");
     }
-    
+
     workflowSessionId = result.data.id;
     return workflowSessionId;
   }
-  
+
   /**
    * Invoke an agent using the SDK's session.prompt() API
    * The agent is specified using @agentName mention syntax
@@ -103,39 +103,39 @@ function createClientAdapter(client: SdkClient, progress?: ProgressReporter): Op
     _options?: { maxTokens?: number }
   ): Promise<{ content: string }> {
     const sessionId = await getWorkflowSession();
-    
+
     // Use @agent mention to invoke the specific agent
     // The prompt is prefixed with @agentName to route to that agent
     const agentPrompt = `@${agentName} ${prompt}`;
-    
+
     const result = await client.session.prompt({
       path: { id: sessionId },
       body: {
         parts: [{ type: "text", text: agentPrompt }],
       },
     });
-    
+
     // Extract the response content from the result
     // The result contains the assistant's message parts
     if (!result.data) {
       throw new Error(`Agent '${agentName}' invocation failed: no response data`);
     }
-    
+
     // The response is in result.data.parts array
     const parts = result.data.parts || [];
     const textParts = parts
       .filter((p: { type: string }) => p.type === "text")
       .map((p: { type: string; text?: string }) => p.text || "");
-    
+
     const content = textParts.join("\n");
-    
+
     return { content };
   }
-  
+
   return {
     // Pass through available tools from the Opencode client
     tools: (client as unknown as { tools?: OpencodeClient["tools"] }).tools || {},
-    
+
     // Agents adapter - creates agents object dynamically
     // Each agent invocation uses session.prompt() with @agent mention
     agents: new Proxy({} as NonNullable<OpencodeClient["agents"]>, {
@@ -152,43 +152,43 @@ function createClientAdapter(client: SdkClient, progress?: ProgressReporter): Op
         return true;
       },
     }),
-    
+
     llm: {
       chat: async (opts) => {
         // For direct LLM chat (not through a named agent), use session.prompt without @mention
         const sessionId = await getWorkflowSession();
-        
+
         // Build prompt from messages
         const systemMessage = opts.messages.find(m => m.role === "system");
         const userMessages = opts.messages.filter(m => m.role === "user");
-        
+
         // Combine into a single prompt
         let prompt = "";
         if (systemMessage) {
           prompt += `[System Instructions]\n${systemMessage.content}\n\n`;
         }
         prompt += userMessages.map(m => m.content).join("\n");
-        
+
         const result = await client.session.prompt({
           path: { id: sessionId },
           body: {
             parts: [{ type: "text", text: prompt }],
           },
         });
-        
+
         if (!result.data) {
           throw new Error("LLM chat failed: no response data");
         }
-        
+
         const parts = result.data.parts || [];
         const textParts = parts
           .filter((p: { type: string }) => p.type === "text")
           .map((p: { type: string; text?: string }) => p.text || "");
-        
+
         return { content: textParts.join("\n") };
       },
     },
-    
+
     app: {
       log: (message, level = "info") => {
         if (progress) {
@@ -224,12 +224,12 @@ function getConfig(): WorkflowPluginConfig {
  */
 function setupCleanupJob(storage: WorkflowStorage, log: Logger, maxAgeInDays: number): void {
   const MILLISECONDS_PER_DAY = 24 * 60 * 60 * 1000;
-  
+
   async function cleanupOldRuns() {
     try {
       const cutoffDate = new Date(Date.now() - maxAgeInDays * MILLISECONDS_PER_DAY);
       const deletedCount = await storage.deleteRunsOlderThan(cutoffDate);
-      
+
       if (deletedCount > 0) {
         log.info(`Cleanup: Deleted ${deletedCount} workflow run(s) older than ${maxAgeInDays} days`);
       }
@@ -237,19 +237,19 @@ function setupCleanupJob(storage: WorkflowStorage, log: Logger, maxAgeInDays: nu
       log.error(`Failed to cleanup old runs: ${error}`);
     }
   }
-  
+
   // Run cleanup once per day at midnight
   const now = new Date();
   const tomorrow = new Date(now.getFullYear(), now.getMonth(), now.getDate() + 1);
   const msUntilMidnight = tomorrow.getTime() - now.getTime();
-  
+
   // Schedule first cleanup at midnight
   setTimeout(() => {
     cleanupOldRuns();
     // Then run every 24 hours
     setInterval(cleanupOldRuns, MILLISECONDS_PER_DAY);
   }, msUntilMidnight);
-  
+
   log.debug(`Scheduled cleanup job to run daily (max age: ${maxAgeInDays} days)`);
 }
 
@@ -268,8 +268,8 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
   const config = getConfig();
   const projectDir = directory || process.cwd();
 
-  // Create logger
-  const log = createLogger(config.verbose);
+  // Create logger (suppress console output to prevent TUI interference)
+  const log = createLogger({ verbose: config.verbose, console: false });
 
   // Plugin state (will be initialized on first use)
   const state: PluginState = {
@@ -313,7 +313,7 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     // Create factory and register workflows for lazy compilation
     const factory = new WorkflowFactory(clientAdapter);
     state.factory = factory;
-    
+
     // Register all workflow definitions (no compilation yet)
     // Workflows will be compiled on-demand when first accessed
     for (const def of workflows.values()) {
@@ -336,10 +336,10 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     const dbPath = config.dbPath ?? resolve(projectDir, ".opencode/data/workflows.db");
     // Pass encryption key from config/env if available
     const encryptionKey = process.env.WORKFLOW_ENCRYPTION_KEY;
-    state.storage = new WorkflowStorage({ 
-      dbPath, 
+    state.storage = new WorkflowStorage({
+      dbPath,
       verbose: config.verbose,
-      encryptionKey 
+      encryptionKey
     }, log);
     await state.storage.init();
 
@@ -418,24 +418,24 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
         case "file.edited":
         case "file.watcher.updated": {
           const path = (event as { path?: string }).path;
-          
+
           // Reload workflows when workflow files change
           if (
             path?.includes(".opencode/workflows/") &&
             (path.endsWith(".json") || path.endsWith(".ts"))
           ) {
             log.info("Workflow file changed, reloading...");
-            
+
             // Close existing storage to prevent connection leaks
             if (state.storage) {
               await state.storage.close();
               state.storage = null;
             }
-            
+
             state.initialized = false;
             await initialize();
           }
-          
+
           // Trigger file change workflows
           if (path && state.initialized && state.runner) {
             handleFileChange(state.triggers, state.definitions, state.runner, log, path);
@@ -491,10 +491,10 @@ Modes:
 
           const runContext = context
             ? {
-                sessionId: context.sessionID,
-                messageId: context.messageID,
-                agent: context.agent,
-              }
+              sessionId: context.sessionID,
+              messageId: context.messageID,
+              agent: context.agent,
+            }
             : undefined;
 
           const result = await executeWorkflowTool(

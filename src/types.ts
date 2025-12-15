@@ -461,10 +461,10 @@ export interface EvalStepOutput {
 }
 
 /** Union of all step output types */
-export type StepOutput = 
-  | ShellStepOutput 
-  | ToolStepOutput 
-  | AgentStepOutput 
+export type StepOutput =
+  | ShellStepOutput
+  | ToolStepOutput
+  | AgentStepOutput
   | SuspendStepOutput
   | WaitStepOutput
   | HttpStepOutput
@@ -592,6 +592,8 @@ export interface LoggerOptions {
   format?: "text" | "json";
   /** Custom output handler (defaults to console) */
   output?: (entry: StructuredLogEntry) => void;
+  /** Whether to output to console (stdout/stderr). Default: true */
+  console?: boolean;
 }
 
 // =============================================================================
@@ -713,7 +715,7 @@ export const EvalStepSchema = BaseStepSchema.extend({
 export function validateIteratorStep(step: z.infer<typeof IteratorStepSchema>): void {
   const hasRunStep = step.runStep !== undefined;
   const hasRunSteps = step.runSteps !== undefined && step.runSteps.length > 0;
-  
+
   if (!hasRunStep && !hasRunSteps) {
     throw new Error(`Iterator step '${step.id}' must have either 'runStep' or 'runSteps'`);
   }
@@ -775,7 +777,7 @@ export interface WorkflowEventPayload {
 export interface WorkflowRegistry {
   workflows: Map<string, WorkflowDefinition>;
   runs: Map<string, WorkflowRun>;
-  
+
   getWorkflow(id: string): WorkflowDefinition | undefined;
   listWorkflows(): WorkflowDefinition[];
   getRun(runId: string): WorkflowRun | undefined;
