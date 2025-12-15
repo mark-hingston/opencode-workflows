@@ -201,11 +201,11 @@ export class WorkflowRunner {
         this.stopStatusInterval(runId);
         return;
       }
-      const totalSteps = Object.keys(run.stepResults).length;
+      const totalSteps = Object.keys(run.stepResults || {}).length;
       const current = run.currentStepId ? `current: ${run.currentStepId}` : "current: n/a";
       const summary = this.progress?.getStepSummary(runId);
       const msg = `Status: ${run.status} (${current}, completed steps: ${totalSteps})${summary ? ` • last: ${summary}` : ""}`;
-      void this.progress.emit(msg, { runId, level: "info", force: true });
+      void this.progress?.emit(msg, { runId, level: "info", force: true });
     }, this.statusIntervalMs);
     this.statusIntervals.set(runId, interval);
   }
