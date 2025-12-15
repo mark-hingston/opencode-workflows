@@ -24,6 +24,7 @@ import type {
 import { JsonValueSchema, WorkflowDefinitionSchema } from "../types.js";
 import { interpolate, interpolateValue, interpolateWithSecrets } from "./interpolation.js";
 
+
 // =============================================================================
 // Process Management
 // =============================================================================
@@ -54,6 +55,7 @@ function killProcessTree(pid: number): Promise<void> {
  * 
  * @param command - Command to execute (passed to shell if safe=false)
  * @param options - Execution options
+ * @param logger - Optional logger for streaming output
  * @returns Promise with stdout, stderr, and exitCode
  */
 async function executeCommand(
@@ -64,16 +66,17 @@ async function executeCommand(
     timeout?: number;
     safe?: boolean;
     args?: string[];
-  } = {}
+  } = {},
+  logger?: (msg: string, level: "info" | "warn" | "error") => void
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
   return new Promise((resolve, reject) => {
     let child: ChildProcess;
-    
+
     const spawnOptions: SpawnOptions = {
       cwd: options.cwd,
       env: options.env || process.env,
     };
-    
+
     if (options.safe && options.args) {
       // Safe mode: bypass shell, run command directly with args array
       // This prevents shell injection entirely
@@ -84,17 +87,17 @@ async function executeCommand(
       const isWindows = process.platform === "win32";
       const shell = isWindows ? "cmd.exe" : "/bin/sh";
       const shellArgs = isWindows ? ["/c", command] : ["-c", command];
-      
+
       child = spawn(shell, shellArgs, spawnOptions);
     }
-    
+
     activeProcesses.add(child);
-    
+
     let stdout = "";
     let stderr = "";
     let killed = false;
     let timeoutId: NodeJS.Timeout | undefined;
-    
+
     // Handle timeout
     if (options.timeout && options.timeout > 0) {
       timeoutId = setTimeout(async () => {
@@ -108,27 +111,37 @@ async function executeCommand(
         ));
       }, options.timeout);
     }
-    
+
     child.stdout?.on("data", (data) => {
-      stdout += data.toString();
+      const chunk = data.toString();
+      stdout += chunk;
+      // Stream to logger if provided
+      if (logger && chunk.trim()) {
+        logger(chunk.trim(), "info");
+      }
     });
-    
+
     child.stderr?.on("data", (data) => {
-      stderr += data.toString();
+      const chunk = data.toString();
+      stderr += chunk;
+      // Stream stderr as info (or warn?) - usually workflow output is info
+      if (logger && chunk.trim()) {
+        logger(chunk.trim(), "info");
+      }
     });
-    
+
     child.on("error", (err) => {
       if (timeoutId) clearTimeout(timeoutId);
       activeProcesses.delete(child);
       reject(err);
     });
-    
+
     child.on("close", (code, signal) => {
       if (timeoutId) clearTimeout(timeoutId);
       activeProcesses.delete(child);
-      
+
       if (killed) return; // Already handled by timeout
-      
+
       if (signal) {
         reject(Object.assign(
           new Error(`Command killed by signal: ${signal}`),
@@ -160,6 +173,7 @@ export async function cleanupAllProcesses(): Promise<void> {
   activeProcesses.clear();
 }
 
+
 // =============================================================================
 // Security Utilities
 // =============================================================================
@@ -184,13 +198,13 @@ const SHELL_DANGEROUS_PATTERNS = [
  */
 function checkCommandSafety(command: string): string[] {
   const warnings: string[] = [];
-  
+
   for (const pattern of SHELL_DANGEROUS_PATTERNS) {
     if (pattern.test(command)) {
       warnings.push(`Command contains potentially dangerous pattern: ${pattern.source}`);
     }
   }
-  
+
   return warnings;
 }
 
@@ -204,10 +218,10 @@ function checkCommandSafety(command: string): string[] {
 function validateFilePath(path: string, allowedBaseDirs?: string[]): string {
   // Normalize the path to resolve . and ..
   const normalized = normalize(path);
-  
+
   // Convert to absolute path
   const absolutePath = isAbsolute(normalized) ? normalized : resolve(process.cwd(), normalized);
-  
+
   // Check for path traversal attempts
   if (path.includes("..")) {
     // After normalization, verify the path doesn't escape allowed directories
@@ -216,13 +230,13 @@ function validateFilePath(path: string, allowedBaseDirs?: string[]): string {
         const absoluteBase = isAbsolute(baseDir) ? baseDir : resolve(process.cwd(), baseDir);
         return absolutePath.startsWith(absoluteBase);
       });
-      
+
       if (!isWithinAllowed) {
         throw new Error(`Path traversal detected: ${path} is outside allowed directories`);
       }
     }
   }
-  
+
   return absolutePath;
 }
 
@@ -255,28 +269,28 @@ function validateUrlForSSRF(urlString: string): string {
   } catch {
     throw new Error(`Invalid URL: ${urlString}`);
   }
-  
+
   // Only allow http and https protocols
   if (!["http:", "https:"].includes(url.protocol)) {
     throw new Error(`Disallowed protocol: ${url.protocol}. Only http and https are allowed.`);
   }
-  
+
   const hostname = url.hostname;
-  
+
   // Check against private IP patterns
   for (const pattern of PRIVATE_IP_PATTERNS) {
     if (pattern.test(hostname)) {
       throw new Error(`SSRF protection: requests to internal addresses (${hostname}) are not allowed`);
     }
   }
-  
+
   // Block requests to metadata endpoints (cloud provider metadata services)
-  if (hostname === "metadata.google.internal" || 
-      hostname === "metadata.goog" ||
-      url.pathname.startsWith("/latest/meta-data")) {
+  if (hostname === "metadata.google.internal" ||
+    hostname === "metadata.goog" ||
+    url.pathname.startsWith("/latest/meta-data")) {
     throw new Error("SSRF protection: requests to cloud metadata endpoints are not allowed");
   }
-  
+
   return urlString;
 }
 
@@ -355,19 +369,19 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
 
       // Interpolate variables in the command with secrets awareness
       const { value: command, masked: maskedCommand } = interpolateWithSecrets(def.command, ctx, secretInputs);
-      
+
       // Security check: Log warnings for potentially dangerous patterns (using masked command)
       const safetyWarnings = checkCommandSafety(command);
       for (const warning of safetyWarnings) {
         client.app.log(`[SECURITY WARNING] ${warning}`, "warn");
       }
-      
+
       // Log command execution to TUI (masked version to hide secrets)
       client.app.log(`> ${maskedCommand}`, "info");
 
-      const options: { 
-        cwd?: string; 
-        env?: NodeJS.ProcessEnv; 
+      const options: {
+        cwd?: string;
+        env?: NodeJS.ProcessEnv;
         timeout?: number;
         safe?: boolean;
         args?: string[];
@@ -401,21 +415,26 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
       }
 
       try {
-        const result = await executeCommand(command, options);
-        
+        const { stdout, stderr, exitCode } = await executeCommand(
+          command,
+          options,
+          // Adapter to map simple log calls to client.app.log with explicit level
+          (msg, level) => client.app.log(msg, level)
+        );
+
         // Check for non-zero exit code and throw if failOnError is enabled
-        if (result.exitCode !== 0 && def.failOnError !== false) {
+        if (exitCode !== 0 && def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`
+            `Command failed with exit code ${exitCode}: ${stderr || stdout}`
           );
         }
-        
+
         const stepResult = {
-          stdout: result.stdout.trim(),
-          stderr: result.stderr.trim(),
-          exitCode: result.exitCode,
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: exitCode,
         };
-        
+
         // Return accumulated context with this step's result added
         return {
           inputs: data.inputs || {},
@@ -423,37 +442,35 @@ export function createShellStep(def: ShellStepDefinition, client: OpencodeClient
           secretInputs,
         };
       } catch (error) {
-        // Re-throw if this is our own error from exit code check above
+        // Re-throw if this is our own error from exit code check above (which is Error)
         if (error instanceof Error && error.message.startsWith("Command failed with exit code")) {
           throw error;
         }
-        
+
         // Handle spawn/process errors (timeout, killed, etc.)
         const execError = error as { stdout?: string; stderr?: string; code?: number; exitCode?: number };
-        
+
         if (def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${execError.code ?? execError.exitCode ?? 1}: ${execError.stderr || execError.stdout || (error as Error).message}`
+            `Command failed: ${execError instanceof Error ? execError.message : String(execError)}`
           );
         }
 
-        const stepResult = {
-          stdout: execError.stdout?.trim() || "",
-          stderr: execError.stderr?.trim() || "",
-          exitCode: execError.code ?? execError.exitCode ?? 1,
-        };
-        
-        // Return accumulated context with this step's result added
         return {
           inputs: data.inputs || {},
-          steps: { ...ctx.steps, [def.id]: stepResult },
+          steps: {
+            ...ctx.steps, [def.id]: {
+              stdout: execError.stdout?.trim() || "",
+              stderr: execError.stderr?.trim() || "",
+              exitCode: execError.code ?? execError.exitCode ?? 1,
+            }
+          },
           secretInputs,
         };
       }
     },
   });
 }
-
 // =============================================================================
 // Tool Step Adapter
 // =============================================================================
@@ -501,7 +518,7 @@ export function createToolStep(def: ToolStepDefinition, client: OpencodeClient) 
       }
 
       const tool = client.tools[def.tool];
-      
+
       if (!tool) {
         const availableTools = Object.keys(client.tools).join(", ") || "(none)";
         throw new Error(`Tool '${def.tool}' not found. Available tools: ${availableTools}`);
@@ -583,7 +600,7 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
         if (!client.agents) {
           throw new Error("No agents available on the opencode client. Ensure agents are configured.");
         }
-        
+
         // Get the agent from the agents object (may be a Proxy)
         const agent = client.agents[def.agent];
         if (!agent) {
@@ -591,7 +608,7 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
         }
 
         client.app.log(`Invoking agent: ${def.agent}`, "info");
-        
+
         try {
           const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
           const stepResult = { response: response.content };
@@ -649,13 +666,13 @@ export function createAgentStep(def: AgentStepDefinition, client: OpencodeClient
  */
 function jsonSchemaToZod(jsonSchema: JsonObject): z.ZodObject<Record<string, z.ZodTypeAny>> {
   const shape: Record<string, z.ZodTypeAny> = {};
-  
+
   for (const [key, typeDef] of Object.entries(jsonSchema)) {
     // Handle both simple type strings and full JSON Schema objects
     const typeValue = typeof typeDef === 'object' && typeDef !== null && 'type' in typeDef
       ? (typeDef as { type: string }).type
       : typeDef;
-    
+
     switch (typeValue) {
       case 'string':
         shape[key] = z.string();
@@ -680,7 +697,7 @@ function jsonSchemaToZod(jsonSchema: JsonObject): z.ZodObject<Record<string, z.Z
         shape[key] = z.unknown();
     }
   }
-  
+
   return z.object(shape);
 }
 
@@ -706,7 +723,7 @@ const SuspendPayloadSchema = z.object({
 export function createSuspendStep(def: SuspendStepDefinition) {
   // Build the resume schema from the JSON Schema definition if provided
   // Mastra will automatically validate resume data against this schema
-  const resumeSchema = def.resumeSchema 
+  const resumeSchema = def.resumeSchema
     ? jsonSchemaToZod(def.resumeSchema)
     : undefined;
 
@@ -768,18 +785,18 @@ export function createSuspendStep(def: SuspendStepDefinition) {
 
       // Suspend with structured payload (validated by suspendSchema)
       // Include resume schema hint for potential UI rendering
-      await suspend({ 
+      await suspend({
         message,
         stepId: def.id,
-        resumeSchemaHint: def.resumeSchema 
+        resumeSchemaHint: def.resumeSchema
           ? Object.fromEntries(
-              Object.entries(def.resumeSchema).map(([k, v]) => [
-                k, 
-                typeof v === 'object' && v !== null && 'type' in v 
-                  ? String((v as { type: string }).type)
-                  : String(v)
-              ])
-            )
+            Object.entries(def.resumeSchema).map(([k, v]) => [
+              k,
+              typeof v === 'object' && v !== null && 'type' in v
+                ? String((v as { type: string }).type)
+                : String(v)
+            ])
+          )
           : undefined,
       });
 
@@ -903,10 +920,10 @@ export function createHttpStep(def: HttpStepDefinition) {
 
       // Interpolate URL and headers
       const rawUrl = interpolate(def.url, ctx);
-      
+
       // SSRF Protection: Validate URL to prevent requests to internal resources
       const url = validateUrlForSSRF(rawUrl);
-      
+
       const headers = def.headers
         ? (interpolateObject(def.headers, ctx) as Record<string, string>)
         : {};
@@ -1093,28 +1110,28 @@ export async function executeInnerStep(
   switch (def.type) {
     case "shell": {
       const { value: command, masked: maskedCommand } = interpolateWithSecrets(def.command, ctx, secretInputs);
-      
+
       // Security check: Log warnings for potentially dangerous patterns
       const safetyWarnings = checkCommandSafety(command);
       for (const warning of safetyWarnings) {
         client.app.log(`[SECURITY WARNING] ${warning}`, "warn");
       }
-      
+
       // Log masked command to protect secrets
       client.app.log(`> ${maskedCommand}`, "info");
-      
-      const options: { 
-        cwd?: string; 
-        env?: NodeJS.ProcessEnv; 
+
+      const options: {
+        cwd?: string;
+        env?: NodeJS.ProcessEnv;
         timeout?: number;
         safe?: boolean;
         args?: string[];
       } = {};
-      
+
       if (def.cwd) {
         options.cwd = interpolate(def.cwd, ctx);
       }
-      
+
       if (def.env) {
         options.env = {
           ...process.env,
@@ -1123,7 +1140,7 @@ export async function executeInnerStep(
           ),
         };
       }
-      
+
       if (def.timeout) {
         options.timeout = def.timeout;
       }
@@ -1136,37 +1153,45 @@ export async function executeInnerStep(
         }
         options.args = def.args.map(arg => interpolate(arg, ctx));
       }
-      
+
       try {
-        const result = await executeCommand(command, options);
-        
+        const { stdout, stderr, exitCode } = await executeCommand(
+          command,
+          options,
+          // Adapter to map simple log calls to client.app.log with explicit level
+          (msg, level) => client.app.log(msg, level)
+        );
+
         // Check for non-zero exit code and throw if failOnError is enabled
-        if (result.exitCode !== 0 && def.failOnError !== false) {
+        if (exitCode !== 0 && def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${result.exitCode}: ${result.stderr || result.stdout}`
+            `Command failed with exit code ${exitCode}: ${stderr || stdout}`
           );
         }
-        
-        return {
-          stdout: result.stdout.trim(),
-          stderr: result.stderr.trim(),
-          exitCode: result.exitCode,
+
+        const stepResult = {
+          stdout: stdout.trim(),
+          stderr: stderr.trim(),
+          exitCode: exitCode,
         };
+
+        // Return accumulated context with this step's result added
+        return stepResult;
       } catch (error) {
-        // Re-throw if this is our own error from exit code check above
+        // Re-throw if this is our own error from exit code check above (which is Error)
         if (error instanceof Error && error.message.startsWith("Command failed with exit code")) {
           throw error;
         }
-        
+
         // Handle spawn/process errors (timeout, killed, etc.)
         const execError = error as { stdout?: string; stderr?: string; code?: number; exitCode?: number };
-        
+
         if (def.failOnError !== false) {
           throw new Error(
-            `Command failed with exit code ${execError.code ?? execError.exitCode ?? 1}: ${execError.stderr || execError.stdout || (error as Error).message}`
+            `Command failed: ${execError instanceof Error ? execError.message : String(execError)}`
           );
         }
-        
+
         return {
           stdout: execError.stdout?.trim() || "",
           stderr: execError.stderr?.trim() || "",
@@ -1174,40 +1199,40 @@ export async function executeInnerStep(
         };
       }
     }
-    
+
     case "tool": {
       const tool = client.tools[def.tool];
-      
+
       if (!tool) {
         const availableTools = Object.keys(client.tools).join(", ") || "(none)";
         throw new Error(`Tool '${def.tool}' not found. Available tools: ${availableTools}`);
       }
-      
+
       const args = def.args
         ? interpolateObject(def.args, ctx)
         : {};
-      
+
       client.app.log(`Running tool: ${def.tool}`, "info");
       const result = await tool.execute(args as JsonObject);
-      
+
       return { result };
     }
-    
+
     case "agent": {
       const prompt = interpolate(def.prompt, ctx);
-      
+
       if (def.agent) {
         if (!client.agents) {
           throw new Error("No agents available on the opencode client. Ensure agents are configured.");
         }
-        
+
         const agent = client.agents[def.agent];
         if (!agent) {
           throw new Error(`Agent '${def.agent}' not found.`);
         }
-        
+
         client.app.log(`Invoking agent: ${def.agent}`, "info");
-        
+
         try {
           const response = await agent.invoke(prompt, { maxTokens: def.maxTokens });
           return { response: response.content };
@@ -1216,36 +1241,36 @@ export async function executeInnerStep(
           throw new Error(`Failed to invoke agent '${def.agent}': ${errorMessage}`);
         }
       }
-      
+
       client.app.log(`LLM prompt: ${prompt.slice(0, 50)}${prompt.length > 50 ? '...' : ''}`, "info");
-      
+
       const messages: Array<{ role: string; content: string }> = [];
-      
+
       if (def.system) {
         messages.push({
           role: "system",
           content: interpolate(def.system, ctx),
         });
       }
-      
+
       messages.push({ role: "user", content: prompt });
-      
+
       const response = await client.llm.chat({
         messages,
         maxTokens: def.maxTokens,
       });
-      
+
       return { response: response.content };
     }
-    
+
     case "http": {
       const rawUrl = interpolate(def.url, ctx);
       const url = validateUrlForSSRF(rawUrl);
-      
+
       const headers = def.headers
         ? (interpolateObject(def.headers, ctx) as Record<string, string>)
         : {};
-      
+
       let body: string | undefined;
       if (def.body !== undefined) {
         if (typeof def.body === "string") {
@@ -1254,11 +1279,11 @@ export async function executeInnerStep(
           body = JSON.stringify(def.body);
         }
       }
-      
+
       const controller = new AbortController();
       const timeoutMs = def.timeout ?? 30000;
       const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
-      
+
       try {
         const response = await fetch(url, {
           method: def.method,
@@ -1266,9 +1291,9 @@ export async function executeInnerStep(
           body,
           signal: controller.signal,
         });
-        
+
         clearTimeout(timeoutId);
-        
+
         const text = await response.text();
         let responseBody: JsonValue = null;
         try {
@@ -1276,11 +1301,11 @@ export async function executeInnerStep(
         } catch {
           // Keep body as null if not valid JSON
         }
-        
+
         if (!response.ok && def.failOnError !== false) {
           throw new Error(`HTTP ${response.status}: ${text}`);
         }
-        
+
         return {
           status: response.status,
           body: responseBody,
@@ -1295,17 +1320,17 @@ export async function executeInnerStep(
         throw error;
       }
     }
-    
+
     case "file": {
       const rawPath = interpolate(def.path, ctx);
       const filePath = validateFilePath(rawPath);
-      
+
       switch (def.action) {
         case "read": {
           const content = await readFile(filePath, "utf-8");
           return { content };
         }
-        
+
         case "write": {
           let writeContent: string;
           if (def.content === undefined) {
@@ -1319,17 +1344,17 @@ export async function executeInnerStep(
           await writeFile(filePath, writeContent, "utf-8");
           return { success: true };
         }
-        
+
         case "delete": {
           await unlink(filePath);
           return { success: true };
         }
-        
+
         default:
           throw new Error(`Unknown file action: ${(def as FileStepDefinition).action}`);
       }
     }
-    
+
     case "wait": {
       // Wait for the specified duration
       await new Promise(resolve => setTimeout(resolve, def.durationMs));
@@ -1338,18 +1363,18 @@ export async function executeInnerStep(
         durationMs: def.durationMs,
       };
     }
-    
+
     case "eval": {
       const timeout = def.scriptTimeout ?? DEFAULT_SCRIPT_TIMEOUT;
       client.app.log(`Executing eval script (timeout: ${timeout}ms)`, "info");
-      
+
       const scriptResult = await executeScript(
-        def.script, 
-        ctx, 
+        def.script,
+        ctx,
         timeout,
         (msg, level) => client.app.log(`[eval] ${msg}`, level)
       );
-      
+
       if (scriptResult.workflow) {
         // Dynamic workflow generation is not supported within iterators or cleanup blocks
         // The workflow would need to be executed by the runner, which is not available here
@@ -1358,16 +1383,16 @@ export async function executeInnerStep(
           "Use eval steps that return simple values, or move the dynamic workflow generation to a top-level step."
         );
       }
-      
+
       return scriptResult.result ?? null;
     }
-    
+
     case "suspend":
       throw new Error("Suspend steps are not supported within iterators");
-    
+
     case "iterator":
       throw new Error("Nested iterators are not supported");
-    
+
     default:
       throw new Error(`Unknown step type: ${(def as StepDefinition).type}`);
   }
@@ -1391,7 +1416,7 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
   // Validate that exactly one of runStep or runSteps is provided
   const hasRunStep = def.runStep !== undefined;
   const hasRunSteps = def.runSteps !== undefined && def.runSteps.length > 0;
-  
+
   if (!hasRunStep && !hasRunSteps) {
     throw new Error(`Iterator step '${def.id}' must have either 'runStep' or 'runSteps'`);
   }
@@ -1435,7 +1460,7 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 
       // Resolve the items array using interpolateValue to preserve the array type
       const itemsValue = interpolateValue(def.items, ctx);
-      
+
       if (!Array.isArray(itemsValue)) {
         throw new Error(
           `Iterator items must resolve to an array. Got ${typeof itemsValue}: ${JSON.stringify(itemsValue)}`
@@ -1453,7 +1478,7 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 
       for (let index = 0; index < items.length; index++) {
         const item = items[index];
-        
+
         // Create context with item and index available for interpolation
         // We inject these as special inputs that can be accessed via {{inputs.item}} and {{inputs.index}}
         const iterationCtx = {
@@ -1471,10 +1496,10 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 
         // Execute each step in the sequence for this item
         const iterationResults: Record<string, JsonValue> = {};
-        
+
         for (let stepIndex = 0; stepIndex < stepsToRun.length; stepIndex++) {
           const stepTemplate = stepsToRun[stepIndex];
-          
+
           // Create a copy of the step definition with a generated id if not provided
           const stepDef: StepDefinition = {
             ...stepTemplate,
@@ -1487,7 +1512,7 @@ export function createIteratorStep(def: IteratorStepDefinition, client: Opencode
 
           // Execute the inner step with secretInputs for masking
           const result = await executeInnerStep(stepDef, iterationCtx, client, secretInputs);
-          
+
           // Store the result so subsequent steps can reference it
           iterationResults[stepDef.id] = result;
           iterationCtx.steps[stepDef.id] = result;
@@ -1531,17 +1556,17 @@ function createSandboxContext(
 ): Context {
   // Create a frozen copy of env to prevent modification
   const frozenEnv = Object.freeze({ ...env });
-  
+
   // Helper to format console arguments
-  const formatArgs = (...args: unknown[]): string => 
+  const formatArgs = (...args: unknown[]): string =>
     args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-  
+
   return {
     // Workflow context (read-only via frozen copies)
     inputs: Object.freeze(JSON.parse(JSON.stringify(inputs))),
     steps: Object.freeze(JSON.parse(JSON.stringify(steps))),
     env: frozenEnv,
-    
+
     // Console mapped to plugin logger (or silent if no logger provided)
     console: {
       log: (...args: unknown[]) => logger?.(formatArgs(...args), "info"),
@@ -1568,7 +1593,7 @@ function createSandboxContext(
     decodeURIComponent,
     encodeURI,
     decodeURI,
-    
+
     // Blocked dangerous globals
     require: undefined,
     process: undefined,
@@ -1597,25 +1622,25 @@ async function executeScript(
   logger?: (message: string, level: "info" | "warn" | "error") => void
 ): Promise<{ result?: JsonValue; workflow?: WorkflowDefinition }> {
   const sandbox = createSandboxContext(ctx.inputs, ctx.steps, ctx.env || {}, logger);
-  
+
   // Wrap the script in an async IIFE to support await and return statements
   const wrappedScript = `
     (async () => {
       ${script}
     })()
   `;
-  
+
   try {
     const result = await Promise.race([
       runInNewContext(wrappedScript, sandbox, {
         timeout,
         displayErrors: true,
       }),
-      new Promise<never>((_, reject) => 
+      new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error(`Script execution timed out after ${timeout}ms`)), timeout)
       ),
     ]);
-    
+
     // Check if result is a workflow definition
     if (result && typeof result === 'object' && 'workflow' in result) {
       const workflowResult = result as { workflow: unknown };
@@ -1627,7 +1652,7 @@ async function executeScript(
       }
       return { workflow: validation.data as WorkflowDefinition };
     }
-    
+
     return { result: result as JsonValue };
   } catch (error) {
     if (error instanceof Error) {
@@ -1689,8 +1714,8 @@ export function createEvalStep(def: EvalStepDefinition, client: OpencodeClient) 
       client.app.log(`Executing eval script in sandbox (timeout: ${timeout}ms)`, "info");
 
       const scriptResult = await executeScript(
-        def.script, 
-        ctx, 
+        def.script,
+        ctx,
         timeout,
         (msg, level) => client.app.log(`[eval] ${msg}`, level)
       );

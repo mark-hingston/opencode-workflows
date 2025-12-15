@@ -1,0 +1,34 @@
+$schema: https://raw.githubusercontent.com/mark-hingston/opencode-workflows/main/schemas/workflow.schema.json
+id: test-render
+name: Test Rendering
+description: Simple workflow to test diagram rendering
+
+steps:
+  - id: step1
+    type: shell
+    description: First step
+    command: echo "Step 1"
+
+  - id: step2
+    type: shell
+    description: Second step
+    after: [step1]
+    command: echo "Step 2"
+
+  - id: step3
+    type: agent
+    description: Agent step
+    after: [step2]
+    prompt: Analyze the results
+
+  - id: step4
+    type: suspend
+    description: Wait for approval
+    after: [step3]
+    message: Ready to continue?
+
+  - id: step5
+    type: shell
+    description: Final step
+    after: [step4]
+    command: echo "Complete"
