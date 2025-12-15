@@ -1653,11 +1653,145 @@ function createSandboxContext(
   };
 }
 
+// =============================================================================
+// Isolated VM Support (optional, for secure sandboxing)
+// =============================================================================
+
 /**
- * Execute a script in a sandboxed VM context.
- * Returns the result of the script execution.
+ * Try to load isolated-vm module (optional peer dependency).
+ * Returns null if not available.
  */
-async function executeScript(
+let isolatedVmModule: typeof import('isolated-vm') | null = null;
+let isolatedVmLoadAttempted = false;
+
+async function getIsolatedVm(): Promise<typeof import('isolated-vm') | null> {
+  if (isolatedVmLoadAttempted) return isolatedVmModule;
+  isolatedVmLoadAttempted = true;
+
+  try {
+    isolatedVmModule = await import('isolated-vm');
+    return isolatedVmModule;
+  } catch {
+    // isolated-vm not installed or failed to load (native module)
+    return null;
+  }
+}
+
+/**
+ * Execute script using isolated-vm for true V8 isolate sandboxing.
+ * This provides memory isolation and prevents sandbox escape attacks.
+ */
+async function executeScriptIsolated(
+  ivm: typeof import('isolated-vm'),
+  script: string,
+  ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
+  timeout: number,
+  logger?: (message: string, level: "info" | "warn" | "error") => void
+): Promise<{ result?: JsonValue; workflow?: WorkflowDefinition }> {
+  // Create a new isolate with memory limit (128MB)
+  const isolate = new ivm.Isolate({ memoryLimit: 128 });
+
+  try {
+    // Create a new context within the isolate
+    const context = await isolate.createContext();
+    const jail = context.global;
+
+    // Set up read-only context data by copying as JSON
+    await jail.set('__inputs', new ivm.ExternalCopy(ctx.inputs).copyInto());
+    await jail.set('__steps', new ivm.ExternalCopy(ctx.steps).copyInto());
+
+    // Create a safe subset of env (no process access)
+    const safeEnv: Record<string, string> = {};
+    for (const [key, value] of Object.entries(ctx.env || {})) {
+      if (value !== undefined) {
+        safeEnv[key] = value;
+      }
+    }
+    await jail.set('__env', new ivm.ExternalCopy(safeEnv).copyInto());
+
+    // Set up console logging via callbacks
+    const logMessages: Array<{ msg: string; level: "info" | "warn" | "error" }> = [];
+    await jail.set('__log', new ivm.Callback((msg: string, level: string) => {
+      logMessages.push({ msg, level: level as "info" | "warn" | "error" });
+    }));
+
+    // Bootstrap script that sets up the sandbox context
+    const bootstrapScript = await isolate.compileScript(`
+      const inputs = __inputs;
+      const steps = __steps;
+      const env = __env;
+      const console = {
+        log: (...args) => __log(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'info'),
+        warn: (...args) => __log(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'warn'),
+        error: (...args) => __log(args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' '), 'error'),
+      };
+      // Make context immutable
+      Object.freeze(inputs);
+      Object.freeze(steps);
+      Object.freeze(env);
+    `);
+    await bootstrapScript.run(context);
+
+    // Compile and run the user script
+    // We wrap the result in JSON.stringify inside the isolate so we can transfer it
+    const wrappedScript = `
+      (async () => {
+        const __userResult = await (async () => {
+          ${script}
+        })();
+        // Serialize to JSON for safe transfer out of isolate
+        return JSON.stringify(__userResult);
+      })()
+    `;
+    const userScript = await isolate.compileScript(wrappedScript);
+
+    // Run with timeout - use promise:true to properly await the async IIFE
+    const resultJson = await userScript.run(context, {
+      timeout,
+      promise: true,  // Wait for the Promise returned by async IIFE
+    });
+
+    // Flush log messages first
+    for (const { msg, level } of logMessages) {
+      logger?.(msg, level);
+    }
+
+    // Parse the JSON result from the isolate
+    let result: JsonValue | undefined;
+    if (typeof resultJson === 'string') {
+      try {
+        result = JSON.parse(resultJson);
+      } catch {
+        // If JSON parsing fails, it's likely a primitive that was stringified
+        result = resultJson;
+      }
+    } else if (resultJson !== undefined && resultJson !== null) {
+      result = resultJson as JsonValue;
+    }
+
+    // Check if result is a workflow definition
+    if (result && typeof result === 'object' && 'workflow' in result) {
+      const workflowResult = result as { workflow: unknown };
+      const validation = WorkflowDefinitionSchema.safeParse(workflowResult.workflow);
+      if (!validation.success) {
+        const errors = validation.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join(', ');
+        throw new Error(`Invalid workflow definition: ${errors}`);
+      }
+      return { workflow: validation.data as WorkflowDefinition };
+    }
+
+    return { result };
+  } finally {
+    // Always dispose the isolate to free memory
+    isolate.dispose();
+  }
+}
+
+/**
+ * Execute script using Node.js vm module (less secure fallback).
+ * WARNING: vm module is NOT a security mechanism and can be escaped.
+ */
+async function executeScriptVm(
   script: string,
   ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
   timeout: number,
@@ -1701,6 +1835,35 @@ async function executeScript(
       throw new Error(`Script execution failed: ${error.message}`);
     }
     throw error;
+  }
+}
+
+/**
+ * Execute a script in a sandboxed context.
+ * Uses isolated-vm when available for true V8 isolation (secure).
+ * Falls back to Node.js vm module when isolated-vm is not installed (less secure).
+ */
+async function executeScript(
+  script: string,
+  ctx: { inputs: Record<string, JsonValue>; steps: Record<string, JsonValue>; env?: NodeJS.ProcessEnv },
+  timeout: number,
+  logger?: (message: string, level: "info" | "warn" | "error") => void
+): Promise<{ result?: JsonValue; workflow?: WorkflowDefinition }> {
+  const ivm = await getIsolatedVm();
+
+  if (ivm) {
+    logger?.("[sandbox] Using isolated-vm for secure execution", "info");
+    try {
+      return await executeScriptIsolated(ivm, script, ctx, timeout, logger);
+    } catch (error) {
+      if (error instanceof Error) {
+        throw new Error(`Script execution failed: ${error.message}`);
+      }
+      throw error;
+    }
+  } else {
+    logger?.("[sandbox] WARNING: Using vm module (isolated-vm not available). Install isolated-vm for better security.", "warn");
+    return executeScriptVm(script, ctx, timeout, logger);
   }
 }
 

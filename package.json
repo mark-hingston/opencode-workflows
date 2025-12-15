@@ -43,11 +43,13 @@
     "zod": "^3.25.0"
   },
   "devDependencies": {
+    "@anthropic-ai/sdk": "^0.71.2",
     "@types/js-yaml": "^4.0.9",
     "@types/minimatch": "^5.1.2",
     "@types/node": "^22.0.0",
     "@types/node-cron": "^3.0.11",
     "@vitest/coverage-v8": "^2.1.9",
+    "isolated-vm": "^6.0.2",
     "tsup": "^8.0.0",
     "tsx": "^4.19.0",
     "typescript": "^5.7.0",
@@ -57,9 +59,13 @@
   "peerDependenciesMeta": {
     "opencode": {
       "optional": true
+    },
+    "isolated-vm": {
+      "optional": true
     }
   },
   "peerDependencies": {
+    "isolated-vm": "^5.0.0",
     "opencode": "*"
   },
   "files": [

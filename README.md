@@ -758,6 +758,21 @@ The eval sandbox blocks access to:
 
 Inputs and steps are frozen (immutable) within the script.
 
+**Enhanced Security with isolated-vm:**
+
+For production environments handling untrusted code, install the optional `isolated-vm` package for true V8 isolate sandboxing:
+
+```bash
+npm install isolated-vm
+```
+
+When `isolated-vm` is installed, eval steps run in a completely isolated V8 context with:
+- True memory isolation (128MB limit per script)
+- Prevention of sandbox escape attacks
+- No prototype chain manipulation possible
+
+If `isolated-vm` is not installed, the plugin falls back to Node.js `vm` module with a warning logged.
+
 **Limitations:**
 - Eval steps that generate workflows cannot be used within iterators or cleanup blocks
 - The sandbox does not support `import` statements
