@@ -186,6 +186,21 @@ function formatRunStatus(run: WorkflowRun): string {
     if (result.error) {
       lines.push(`  Error: ${result.error}`);
     }
+    // Display step output (if available and not too large)
+    if (result.output) {
+      try {
+        const outputStr = JSON.stringify(result.output, null, 2);
+        // Limit output display to avoid overwhelming the UI
+        const maxLength = 500;
+        if (outputStr.length > maxLength) {
+          lines.push(`  Output: ${outputStr.slice(0, maxLength)}... (truncated)`);
+        } else {
+          lines.push(`  Output: \`\`\`json\n${outputStr}\n  \`\`\``);
+        }
+      } catch {
+        lines.push(`  Output: ${String(result.output)}`);
+      }
+    }
   }
 
   return lines.join("\n");

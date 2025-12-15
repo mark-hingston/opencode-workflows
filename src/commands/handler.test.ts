@@ -295,6 +295,107 @@ describe("handleWorkflowCommand", () => {
       expect(result.message).toContain("npm error");
     });
 
+    it("should display step outputs in status", async () => {
+      const mockRun: WorkflowRun = {
+        runId: "run-789",
+        workflowId: "build",
+        status: "completed",
+        startedAt: new Date("2024-01-01T00:00:00Z"),
+        completedAt: new Date("2024-01-01T00:05:00Z"),
+        stepResults: {
+          compile: {
+            stepId: "compile",
+            status: "success",
+            duration: 2000,
+            startedAt: new Date(),
+            output: { stdout: "Build successful", stderr: "", exitCode: 0 },
+          },
+          test: {
+            stepId: "test",
+            status: "success",
+            duration: 3000,
+            startedAt: new Date(),
+            output: { stdout: "All tests passed", stderr: "", exitCode: 0 },
+          },
+        },
+        inputs: {},
+      };
+      vi.mocked(mockRunner.getStatus).mockReturnValue(mockRun);
+
+      const result = await handleWorkflowCommand("status run-789", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("compile");
+      expect(result.message).toContain("test");
+      // Check that outputs are displayed
+      expect(result.message).toContain("Build successful");
+      expect(result.message).toContain("All tests passed");
+      expect(result.message).toContain("Output:");
+    });
+
+    it("should truncate large step outputs", async () => {
+      const largeOutput = "x".repeat(600); // Longer than 500 char limit
+      const mockRun: WorkflowRun = {
+        runId: "run-999",
+        workflowId: "large",
+        status: "completed",
+        startedAt: new Date("2024-01-01T00:00:00Z"),
+        completedAt: new Date("2024-01-01T00:05:00Z"),
+        stepResults: {
+          large: {
+            stepId: "large",
+            status: "success",
+            duration: 1000,
+            startedAt: new Date(),
+            output: { result: largeOutput },
+          },
+        },
+        inputs: {},
+      };
+      vi.mocked(mockRunner.getStatus).mockReturnValue(mockRun);
+
+      const result = await handleWorkflowCommand("status run-999", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("Output:");
+      expect(result.message).toContain("(truncated)");
+      // Should not contain the full output
+      expect(result.message).not.toContain("x".repeat(600));
+    });
+
+    it("should handle step outputs that cannot be serialized as JSON", async () => {
+      const mockRun: WorkflowRun = {
+        runId: "run-888",
+        workflowId: "circular",
+        status: "completed",
+        startedAt: new Date("2024-01-01T00:00:00Z"),
+        completedAt: new Date("2024-01-01T00:05:00Z"),
+        stepResults: {
+          step1: {
+            stepId: "step1",
+            status: "success",
+            duration: 1000,
+            startedAt: new Date(),
+            // Create a circular reference that can't be JSON.stringify'd
+            output: (() => {
+              const obj: Record<string, unknown> = { foo: "bar" };
+              obj.self = obj;
+              return obj as never;
+            })(),
+          },
+        },
+        inputs: {},
+      };
+      vi.mocked(mockRunner.getStatus).mockReturnValue(mockRun);
+
+      const result = await handleWorkflowCommand("status run-888", mockCtx);
+
+      expect(result.success).toBe(true);
+      expect(result.message).toContain("Output:");
+      // Should fall back to String() conversion
+      expect(result.message).toContain("[object Object]");
+    });
+
     it("should return error for missing run id", async () => {
       const result = await handleWorkflowCommand("status", mockCtx);
 
