@@ -22,6 +22,7 @@ import { WorkflowFactory } from "./factory/index.js";
 import { WorkflowRunner, WorkflowStorage } from "./commands/index.js";
 import { executeWorkflowTool } from "./tools/index.js";
 import { resolve } from "node:path";
+import { ProgressReporter } from "./progress.js";
 import {
   createTriggerState,
   setupTriggers as setupTriggersFromModule,
@@ -41,6 +42,7 @@ interface PluginState {
   initialized: boolean;
   /** Trigger state for cron and file change triggers */
   triggers: TriggerState;
+  progress: ProgressReporter | null;
 }
 
 /**
@@ -57,7 +59,7 @@ type SdkClient = PluginInput["client"];
  * For agent steps, we use the SDK's session.prompt() API with @agent mentions
  * to invoke named agents. This creates a child session for each agent invocation.
  */
-function createClientAdapter(client: SdkClient): OpencodeClient {
+function createClientAdapter(client: SdkClient, progress?: ProgressReporter): OpencodeClient {
   // Cache for workflow sessions to avoid creating too many
   let workflowSessionId: string | null = null;
   
@@ -189,6 +191,10 @@ function createClientAdapter(client: SdkClient): OpencodeClient {
     
     app: {
       log: (message, level = "info") => {
+        if (progress) {
+          void progress.emit(message, { level: level as "info" | "warn" | "error" });
+          return;
+        }
         // Use the SDK's app.log API
         client.app.log({
           body: {
@@ -274,6 +280,7 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     log,
     initialized: false,
     triggers: createTriggerState(),
+    progress: null,
   };
 
   /**
@@ -284,8 +291,11 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
 
     log.info("Initializing workflow plugin...");
 
+    // Progress reporter for streaming updates back to the originating session
+    state.progress = new ProgressReporter(client, log);
+
     // Create client adapter
-    const clientAdapter = createClientAdapter(client);
+    const clientAdapter = createClientAdapter(client, state.progress);
 
     // Load workflow definitions
     const { workflows, errors } = await loadWorkflows(
@@ -346,7 +356,7 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
     state.runner = new WorkflowRunner(state.factory, log, state.storage, {
       timeout: config.timeout,
       maxCompletedRuns: config.maxCompletedRuns,
-    });
+    }, state.progress || undefined);
 
     // Restore active runs from storage
     await state.runner.init();
@@ -381,6 +391,29 @@ export const WorkflowPlugin: Plugin = async ({ project, directory, worktree, cli
             await initialize();
           }
           break;
+
+        case "session.deleted":
+        case "session.error": {
+          if (!state.initialized) {
+            await initialize();
+          }
+          const properties = (event as { properties?: Record<string, unknown> }).properties || {};
+          const sessionId =
+            (properties as { sessionID?: string }).sessionID ||
+            (properties as { info?: { id?: string } }).info?.id;
+
+          if (sessionId && state.runner) {
+            const reason =
+              event.type === "session.error"
+                ? "Workflow suspended: chat session errored"
+                : "Workflow suspended: chat session closed";
+            const suspended = await state.runner.suspendRunsForSession(sessionId, reason);
+            if (suspended.length > 0) {
+              log.warn(`Suspended ${suspended.length} workflow run(s) after session interruption (${sessionId})`);
+            }
+          }
+          break;
+        }
 
         case "file.edited":
         case "file.watcher.updated": {
@@ -445,7 +478,7 @@ Modes:
           ).optional(),
           resumeData: tool.schema.any().optional(),
         },
-        async execute(args, _context: ToolContext) {
+        async execute(args, context: ToolContext) {
           // Ensure initialized
           if (!state.initialized) {
             await initialize();
@@ -456,6 +489,14 @@ Modes:
             return JSON.stringify({ success: false, message: "Workflow runner not initialized" });
           }
 
+          const runContext = context
+            ? {
+                sessionId: context.sessionID,
+                messageId: context.messageID,
+                agent: context.agent,
+              }
+            : undefined;
+
           const result = await executeWorkflowTool(
             {
               mode: args.mode,
@@ -465,7 +506,8 @@ Modes:
               resumeData: args.resumeData as JsonValue | undefined,
             },
             state.definitions,
-            state.runner
+            state.runner,
+            runContext
           );
 
           return JSON.stringify(result);
@@ -527,4 +569,5 @@ export type {
   Logger,
   WorkflowEventPayload,
   WorkflowRegistry,
+  RunContext,
 } from "./types.js";

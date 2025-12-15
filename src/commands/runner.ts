@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { MissingInputsError } from "../types.js";
+import { MissingInputsError, type RunContext } from "../types.js";
 import type { 
   WorkflowRun, 
   Logger, 
@@ -14,6 +14,8 @@ import type {
 import type { WorkflowFactory, WorkflowFactoryResult } from "../factory/index.js";
 import type { WorkflowStorage } from "../storage/index.js";
 import { executeInnerStep } from "../adapters/index.js";
+import { cleanupAllProcesses } from "../adapters/steps.js";
+import type { ProgressReporter } from "../progress.js";
 
 /**
  * Configuration options for WorkflowRunner
@@ -112,16 +114,111 @@ export class WorkflowRunner {
   private timeout: number;
   private maxCompletedRuns: number;
   private throwOnPersistenceError: boolean;
+  private sessionRuns = new Map<string, Set<string>>();
+  private interruptedRuns = new Set<string>();
+  private statusIntervals = new Map<string, NodeJS.Timeout>();
+  private statusIntervalMs = 45000;
 
   constructor(
     private factory: WorkflowFactory,
     private log: Logger,
     private storage?: WorkflowStorage,
-    config?: WorkflowRunnerConfig
+    config?: WorkflowRunnerConfig,
+    private progress?: ProgressReporter
   ) {
     this.timeout = config?.timeout ?? 300000; // Default 5 minutes
     this.maxCompletedRuns = config?.maxCompletedRuns ?? 1000;
     this.throwOnPersistenceError = config?.throwOnPersistenceError ?? false;
+  }
+
+  private addRunToSessionIndex(runId: string, context?: RunContext): void {
+    if (!context?.sessionId) return;
+    const runs = this.sessionRuns.get(context.sessionId) ?? new Set<string>();
+    runs.add(runId);
+    this.sessionRuns.set(context.sessionId, runs);
+  }
+
+  private removeRunFromSessionIndex(runId: string): void {
+    for (const [sessionId, runs] of this.sessionRuns.entries()) {
+      runs.delete(runId);
+      if (runs.size === 0) {
+        this.sessionRuns.delete(sessionId);
+      }
+    }
+  }
+
+  private getRunsForSession(sessionId: string): WorkflowRun[] {
+    const runIds = this.sessionRuns.get(sessionId);
+    if (!runIds) return [];
+    return Array.from(runIds)
+      .map((id) => this.runs.get(id))
+      .filter((run): run is WorkflowRun => Boolean(run));
+  }
+
+  /**
+   * Request suspension of all runs tied to a session (e.g., when chat is interrupted).
+   * Marks runs as interrupted and cleans up active processes.
+   */
+  async suspendRunsForSession(sessionId: string, reason: string): Promise<string[]> {
+    const runs = this.getRunsForSession(sessionId);
+    const suspended: string[] = [];
+
+    for (const run of runs) {
+      const runId = run.runId;
+      this.interruptedRuns.add(runId);
+      this.stopStatusInterval(runId);
+      run.error = reason;
+      run.suspendedData = { reason };
+      run.status = "suspended";
+      await this.persistRun(run);
+      suspended.push(runId);
+      await this.progress?.emit(`Workflow ${run.workflowId} suspended: ${reason}`, {
+        runId,
+        level: "warn",
+      });
+    }
+
+    // Best-effort process cleanup to stop running shell steps
+    try {
+      await cleanupAllProcesses();
+    } catch (error) {
+      this.log.debug(`Process cleanup note: ${error}`);
+    }
+
+    return suspended;
+  }
+
+  /**
+   * Start periodic status updates for a run.
+   */
+  private startStatusInterval(runId: string): void {
+    if (!this.progress) return;
+    this.stopStatusInterval(runId);
+    const interval = setInterval(() => {
+      const run = this.runs.get(runId);
+      if (!run) return;
+      if (["completed", "failed", "cancelled", "suspended"].includes(run.status)) {
+        this.stopStatusInterval(runId);
+        return;
+      }
+      const totalSteps = Object.keys(run.stepResults).length;
+      const current = run.currentStepId ? `current: ${run.currentStepId}` : "current: n/a";
+      const summary = this.progress?.getStepSummary(runId);
+      const msg = `Status: ${run.status} (${current}, completed steps: ${totalSteps})${summary ? ` • last: ${summary}` : ""}`;
+      void this.progress.emit(msg, { runId, level: "info", force: true });
+    }, this.statusIntervalMs);
+    this.statusIntervals.set(runId, interval);
+  }
+
+  /**
+   * Stop periodic status updates for a run.
+   */
+  private stopStatusInterval(runId: string): void {
+    const interval = this.statusIntervals.get(runId);
+    if (interval) {
+      clearInterval(interval);
+      this.statusIntervals.delete(runId);
+    }
   }
 
   /**
@@ -149,6 +246,10 @@ export class WorkflowRunner {
       .then((activeRuns) => {
         for (const run of activeRuns) {
           this.runs.set(run.runId, run);
+          this.addRunToSessionIndex(run.runId, run.context);
+          if (run.context) {
+            this.progress?.setRunContext(run.runId, run.context);
+          }
         }
         this.log.info(`Restored ${activeRuns.length} active workflow run(s) from storage`);
       })
@@ -166,6 +267,10 @@ export class WorkflowRunner {
         for (const run of recentRuns) {
           if (!this.runs.has(run.runId)) {
             this.runs.set(run.runId, run);
+            this.addRunToSessionIndex(run.runId, run.context);
+            if (run.context) {
+              this.progress?.setRunContext(run.runId, run.context);
+            }
             newCount++;
           }
         }
@@ -205,6 +310,8 @@ export class WorkflowRunner {
     for (const run of this.runs.values()) {
       if (terminalStatuses.includes(run.status)) {
         completedRuns.push(run);
+        this.removeRunFromSessionIndex(run.runId);
+        this.progress?.clearRunContext(run.runId);
       }
     }
 
@@ -330,7 +437,8 @@ export class WorkflowRunner {
    */
   async run(
     workflowId: string,
-    inputs: WorkflowInputs = {}
+    inputs: WorkflowInputs = {},
+    context?: RunContext
   ): Promise<string> {
     const compiled = this.factory.get(workflowId);
     if (!compiled) {
@@ -358,9 +466,14 @@ export class WorkflowRunner {
       inputs,
       stepResults: {},
       startedAt: new Date(),
+      context,
     };
 
     this.runs.set(runId, run);
+    this.addRunToSessionIndex(runId, context);
+    if (context) {
+      this.progress?.setRunContext(runId, context);
+    }
     await this.persistRun(run);
     this.log.info(`Starting workflow ${workflowId} with run ID: ${runId}`, {
       workflowId,
@@ -387,6 +500,20 @@ export class WorkflowRunner {
     compiled: WorkflowFactoryResult,
     inputs: WorkflowInputs
   ): Promise<void> {
+    if (this.progress) {
+      return this.progress.withRunContext(runId, () => this.executeWorkflowInternal(runId, compiled, inputs));
+    }
+    return this.executeWorkflowInternal(runId, compiled, inputs);
+  }
+
+  /**
+   * Internal execution logic (separated so we can wrap with run context)
+   */
+  private async executeWorkflowInternal(
+    runId: string,
+    compiled: WorkflowFactoryResult,
+    inputs: WorkflowInputs
+  ): Promise<void> {
     const run = this.runs.get(runId);
     if (!run) return;
 
@@ -400,6 +527,8 @@ export class WorkflowRunner {
         workflowId: compiled.id,
         runId,
       });
+      await this.progress?.emit(`Workflow ${compiled.id} started`, { runId });
+      this.startStatusInterval(runId);
 
       // Create a run instance
       const workflow = compiled.workflow as MastraWorkflow;
@@ -428,6 +557,19 @@ export class WorkflowRunner {
         timeout.clear();
       }
 
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${compiled.id} suspended due to interruption`, {
+          runId,
+          level: "warn",
+        });
+        this.interruptedRuns.delete(runId);
+        this.stopStatusInterval(runId);
+        return;
+      }
+
       // Check for suspend - no cleanup needed, workflow may resume later
       if (result.status === "suspended") {
         run.status = "suspended";
@@ -447,6 +589,12 @@ export class WorkflowRunner {
           runId,
           stepId: run.currentStepId,
         });
+        await this.progress?.emit(
+          `Workflow ${compiled.id} suspended at ${run.currentStepId ?? "unknown step"}`,
+          { runId, level: "warn" }
+        );
+        this.interruptedRuns.delete(runId);
+        this.stopStatusInterval(runId);
         return;
       }
 
@@ -508,6 +656,19 @@ export class WorkflowRunner {
         };
       }
       
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${compiled.id} suspended due to interruption`, {
+          runId,
+          level: "warn",
+        });
+        this.interruptedRuns.delete(runId);
+        this.stopStatusInterval(runId);
+        return;
+      }
+
       // Main workflow completed successfully
       run.status = "completed";
       run.completedAt = new Date();
@@ -516,6 +677,8 @@ export class WorkflowRunner {
         runId,
         durationMs: run.completedAt.getTime() - run.startedAt.getTime(),
       });
+      await this.progress?.emit(`Workflow ${compiled.id} completed successfully`, { runId });
+      this.stopStatusInterval(runId);
 
     } catch (error) {
       // Capture the error for onFailure block
@@ -526,6 +689,19 @@ export class WorkflowRunner {
         ([, result]) => result.status === "failed"
       );
       failedStepId = failedStep?.[0];
+
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.error = workflowError?.message ?? "Suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${compiled.id} suspended: ${run.error}`, {
+          runId,
+          level: "warn",
+        });
+        this.interruptedRuns.delete(runId);
+        return;
+      }
       
       run.status = "failed";
       run.error = String(error);
@@ -534,6 +710,10 @@ export class WorkflowRunner {
         workflowId: compiled.id,
         runId,
         metadata: { error: String(error), failedStepId: failedStepId ?? null },
+      });
+      await this.progress?.emit(`Workflow ${compiled.id} failed: ${run.error}`, {
+        runId,
+        level: "error",
       });
     }
 
@@ -562,12 +742,28 @@ export class WorkflowRunner {
     // Persist final state and cleanup
     await this.persistRun(run);
     this.cleanupCompletedRuns();
+    this.interruptedRuns.delete(runId);
   }
 
   /**
    * Resume a suspended workflow
    */
-  async resume(runId: string, data?: JsonValue): Promise<void> {
+  async resume(runId: string, data?: JsonValue, context?: RunContext): Promise<void> {
+    if (context) {
+      this.addRunToSessionIndex(runId, context);
+      this.progress?.setRunContext(runId, context);
+      const run = this.runs.get(runId);
+      if (run) {
+        run.context = context;
+      }
+    }
+    if (this.progress) {
+      return this.progress.withRunContext(runId, () => this.resumeInternal(runId, data, context));
+    }
+    return this.resumeInternal(runId, data, context);
+  }
+
+  private async resumeInternal(runId: string, data?: JsonValue, context?: RunContext): Promise<void> {
     const run = this.runs.get(runId);
     if (!run) {
       throw new Error(`Run not found: ${runId}`);
@@ -616,6 +812,9 @@ export class WorkflowRunner {
       run.status = "running";
       await this.persistRun(run);
       this.log.info(`Resuming workflow run: ${runId} at step: ${run.currentStepId}`);
+      await this.progress?.emit(`Resuming workflow ${run.workflowId} at ${run.currentStepId}`, {
+        runId,
+      });
 
       // Resume the workflow
       if (!mastraRun.resume) {
@@ -647,6 +846,18 @@ export class WorkflowRunner {
         data,
       });
 
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${run.workflowId} suspended due to interruption`, {
+          runId,
+          level: "warn",
+        });
+        this.stopStatusInterval(runId);
+        return;
+      }
+
       // Save step results from this execution
       this.saveStepResults(run, result.steps || {});
 
@@ -677,12 +888,32 @@ export class WorkflowRunner {
         }
         await this.persistRun(run);
         this.log.info(`Workflow ${run.workflowId} suspended again at: ${run.currentStepId}`);
+        await this.progress?.emit(
+          `Workflow ${run.workflowId} suspended again at ${run.currentStepId ?? "unknown step"}`,
+          { runId, level: "warn" }
+        );
+        this.interruptedRuns.delete(runId);
+        this.stopStatusInterval(runId);
+        return;
+      }
+
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${run.workflowId} suspended due to interruption`, {
+          runId,
+          level: "warn",
+        });
+        this.interruptedRuns.delete(runId);
         return;
       }
 
       run.status = "completed";
       run.completedAt = new Date();
       this.log.info(`Workflow ${run.workflowId} completed after resume`);
+      await this.progress?.emit(`Workflow ${run.workflowId} completed after resume`, { runId });
+      this.stopStatusInterval(runId);
     } catch (error) {
       workflowError = error as Error;
       
@@ -691,11 +922,28 @@ export class WorkflowRunner {
         ([, result]) => result.status === "failed"
       );
       failedStepId = failedStep?.[0];
-      
+
+      if (this.interruptedRuns.has(runId)) {
+        run.status = "suspended";
+        run.error = (error as Error)?.message ?? "Suspended";
+        run.suspendedData = run.suspendedData ?? { reason: "Session interrupted" };
+        await this.persistRun(run);
+        await this.progress?.emit(`Workflow ${run.workflowId} suspended: ${run.error}`, {
+          runId,
+          level: "warn",
+        });
+        this.interruptedRuns.delete(runId);
+        return;
+      }
+
       run.status = "failed";
       run.error = String(error);
       run.completedAt = new Date();
       this.log.error(`Workflow ${run.workflowId} failed after resume: ${error}`);
+      await this.progress?.emit(`Workflow ${run.workflowId} failed after resume: ${run.error}`, {
+        runId,
+        level: "error",
+      });
     }
 
     // Execute onFailure steps if workflow failed and onFailure is defined
@@ -723,6 +971,7 @@ export class WorkflowRunner {
     // Persist final state and cleanup
     await this.persistRun(run);
     this.cleanupCompletedRuns();
+    this.interruptedRuns.delete(runId);
   }
 
   /**
@@ -743,6 +992,12 @@ export class WorkflowRunner {
     await this.persistRun(run);
     this.cleanupCompletedRuns();
     this.log.info(`Cancelled workflow run: ${runId}`);
+    await this.progress?.emit(`Workflow ${run.workflowId} cancelled`, {
+      runId,
+      level: "warn",
+    });
+    this.removeRunFromSessionIndex(runId);
+    this.progress?.clearRunContext(runId);
 
     // Clean up Mastra run
     this.mastraRuns.delete(runId);
@@ -810,6 +1065,10 @@ export class WorkflowRunner {
       for (const run of runs) {
         if (!this.runs.has(run.runId)) {
           this.runs.set(run.runId, run);
+          this.addRunToSessionIndex(run.runId, run.context);
+          if (run.context) {
+            this.progress?.setRunContext(run.runId, run.context);
+          }
         }
       }
       

@@ -10,6 +10,7 @@ Workflow automation plugin for OpenCode using the Mastra workflow engine. Define
 - **Hybrid Execution**: Mix shell commands, API calls, and LLM prompts
 - **Human-in-the-Loop**: Suspend workflows for human approval
 - **Parallel Execution**: Run independent steps concurrently
+- **Live Progress & Resilience**: Progress streams to the initiating chat session, and active workflows auto-suspend on chat interruption so you can resume later
 
 ## Installation
 
@@ -99,6 +100,7 @@ Workflow runs are automatically persisted to a LibSQL (SQLite) database. This en
 - **Crash Recovery**: Active runs are restored on plugin restart
 - **Run History**: Query past workflow executions via `/workflow runs`
 - **Suspend/Resume**: Suspended workflows survive session restarts
+- **Session-aware progress**: Progress updates are routed to the originating session; if the chat is interrupted, workflows are suspended and can be resumed with `/workflow resume <runId>`
 
 The database is created automatically at the configured `dbPath`.
 

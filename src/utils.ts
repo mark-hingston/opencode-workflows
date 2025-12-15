@@ -82,6 +82,7 @@ export type {
   Logger,
   WorkflowEventPayload,
   WorkflowRegistry,
+  RunContext,
 } from "./types.js";
 
 // Zod schemas for validation (consumers may want to validate workflow definitions)

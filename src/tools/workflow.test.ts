@@ -108,7 +108,7 @@ describe("executeWorkflowTool", () => {
 
       expect(result.success).toBe(true);
       expect(result.runId).toBe("run-123");
-      expect(mockRunner.run).toHaveBeenCalledWith("deploy", {});
+      expect(mockRunner.run).toHaveBeenCalledWith("deploy", {}, undefined);
     });
 
     it("should pass parameters to workflow", async () => {
@@ -119,7 +119,7 @@ describe("executeWorkflowTool", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(mockRunner.run).toHaveBeenCalledWith("deploy", { version: "1.0.0" });
+      expect(mockRunner.run).toHaveBeenCalledWith("deploy", { version: "1.0.0" }, undefined);
     });
 
     it("should return error when workflowId is missing", async () => {
@@ -226,7 +226,7 @@ describe("executeWorkflowTool", () => {
 
       expect(result.success).toBe(true);
       expect(result.message).toContain("Resumed");
-      expect(mockRunner.resume).toHaveBeenCalledWith("run-123", undefined);
+      expect(mockRunner.resume).toHaveBeenCalledWith("run-123", undefined, undefined);
     });
 
     it("should pass resume data", async () => {
@@ -246,7 +246,7 @@ describe("executeWorkflowTool", () => {
       );
 
       expect(result.success).toBe(true);
-      expect(mockRunner.resume).toHaveBeenCalledWith("run-123", { approved: true });
+      expect(mockRunner.resume).toHaveBeenCalledWith("run-123", { approved: true }, undefined);
     });
 
     it("should return error when runId is missing", async () => {

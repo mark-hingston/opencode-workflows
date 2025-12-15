@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { WorkflowDefinition, WorkflowRun, InputValue, JsonValue } from "../types.js";
+import type { WorkflowDefinition, WorkflowRun, InputValue, JsonValue, RunContext } from "../types.js";
 import { JsonValueSchema } from "../types.js";
 import type { WorkflowRunner } from "../commands/runner.js";
 
@@ -53,7 +53,8 @@ export interface WorkflowToolResult {
 export async function executeWorkflowTool(
   input: WorkflowToolInput,
   definitions: Map<string, WorkflowDefinition>,
-  runner: WorkflowRunner
+  runner: WorkflowRunner,
+  context?: RunContext
 ): Promise<WorkflowToolResult> {
   switch (input.mode) {
     case "list": {
@@ -106,7 +107,8 @@ export async function executeWorkflowTool(
       try {
         const runId = await runner.run(
           input.workflowId,
-          input.params || {}
+          input.params || {},
+          context
         );
         return {
           success: true,
@@ -153,7 +155,7 @@ export async function executeWorkflowTool(
       }
 
       try {
-        await runner.resume(input.runId, input.resumeData);
+        await runner.resume(input.runId, input.resumeData, context);
         const run = runner.getStatus(input.runId);
         return {
           success: true,

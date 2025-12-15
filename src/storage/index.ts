@@ -1,7 +1,7 @@
 import { LibSQLStore } from "@mastra/libsql";
 import { mkdir } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
-import type { WorkflowRun, Logger } from "../types.js";
+import type { WorkflowRun, Logger, RunContext } from "../types.js";
 import { encryptSecretInputs, decryptSecretInputs } from "../adapters/secrets.js";
 
 /**
@@ -34,6 +34,9 @@ interface SerializedRun {
   startedAt: string; // ISO date string
   completedAt?: string; // ISO date string
   error?: string;
+  sessionId?: string;
+  messageId?: string;
+  agent?: string;
 }
 
 /**
@@ -57,6 +60,11 @@ interface DatabaseRow {
   completed_at?: string;
   completedAt?: string;
   error?: string;
+  session_id?: string;
+  sessionId?: string;
+  message_id?: string;
+  messageId?: string;
+  agent?: string;
 }
 
 /**
@@ -266,6 +274,9 @@ export class WorkflowStorage {
           started_at: { type: "text", nullable: false },
           completed_at: { type: "text", nullable: true },
           error: { type: "text", nullable: true },
+          session_id: { type: "text", nullable: true },
+          message_id: { type: "text", nullable: true },
+          agent: { type: "text", nullable: true },
         },
       });
 
@@ -277,6 +288,11 @@ export class WorkflowStorage {
         this.log.debug(`Table creation note: ${error}`);
       }
     }
+
+    // Ensure newer optional columns exist for older databases
+    await this.addOptionalColumn("session_id", "text");
+    await this.addOptionalColumn("message_id", "text");
+    await this.addOptionalColumn("agent", "text");
   }
 
   /**
@@ -299,6 +315,23 @@ export class WorkflowStorage {
       } catch (error) {
         // Index might already exist or other non-critical error
         this.log.debug(`Index creation note: ${error}`);
+      }
+    }
+  }
+
+  /**
+  * Add a column if it does not already exist.
+  * SQLite does not support IF NOT EXISTS for ALTER TABLE, so we swallow duplicate errors.
+  */
+  private async addOptionalColumn(column: string, type: string): Promise<void> {
+    if (!this.store) return;
+
+    try {
+      await this.store.executeSQL(`ALTER TABLE opencode_workflow_runs ADD COLUMN ${column} ${type}`);
+    } catch (error) {
+      // Ignore duplicate column errors, log others for visibility
+      if (!String(error).includes("duplicate column name")) {
+        this.log.debug(`Column add note (${column}): ${error}`);
       }
     }
   }
@@ -333,6 +366,9 @@ export class WorkflowStorage {
       startedAt: run.startedAt.toISOString(),
       completedAt: run.completedAt?.toISOString(),
       error: run.error,
+      sessionId: run.context?.sessionId,
+      messageId: run.context?.messageId,
+      agent: run.context?.agent,
     };
 
     const store = this.store;
@@ -353,6 +389,9 @@ export class WorkflowStorage {
             started_at: serialized.startedAt,
             completed_at: serialized.completedAt ?? null,
             error: serialized.error ?? null,
+            session_id: serialized.sessionId ?? null,
+            message_id: serialized.messageId ?? null,
+            agent: serialized.agent ?? null,
           },
         });
         this.log.debug(`Saved run: ${run.runId}`);
@@ -397,6 +436,9 @@ export class WorkflowStorage {
       startedAt: run.startedAt.toISOString(),
       completedAt: run.completedAt?.toISOString(),
       error: run.error,
+      sessionId: run.context?.sessionId,
+      messageId: run.context?.messageId,
+      agent: run.context?.agent,
     };
 
     const store = this.store;
@@ -410,24 +452,30 @@ export class WorkflowStorage {
           inputs = ?,
           step_results = ?,
           current_step_id = ?,
-          suspended_data = ?,
-          started_at = ?,
-          completed_at = ?,
-          error = ?
-        WHERE run_id = ?`,
-        [
-          serialized.workflowId,
-          serialized.status,
-          serialized.inputs,
-          serialized.stepResults,
-          serialized.currentStepId ?? null,
-          serialized.suspendedData ?? null,
-          serialized.startedAt,
-          serialized.completedAt ?? null,
-          serialized.error ?? null,
-          serialized.runId,
-        ]
-      );
+        suspended_data = ?,
+        started_at = ?,
+        completed_at = ?,
+        error = ?,
+        session_id = ?,
+        message_id = ?,
+        agent = ?
+      WHERE run_id = ?`,
+      [
+        serialized.workflowId,
+        serialized.status,
+        serialized.inputs,
+        serialized.stepResults,
+        serialized.currentStepId ?? null,
+        serialized.suspendedData ?? null,
+        serialized.startedAt,
+        serialized.completedAt ?? null,
+        serialized.error ?? null,
+        serialized.sessionId ?? null,
+        serialized.messageId ?? null,
+        serialized.agent ?? null,
+        serialized.runId,
+      ]
+    );
     }, `updateRun(${run.runId})`);
   }
 
@@ -597,6 +645,9 @@ export class WorkflowStorage {
       startedAt: String(row.started_at ?? row.startedAt ?? new Date().toISOString()),
       completedAt: row.completed_at ? String(row.completed_at) : undefined,
       error: row.error ? String(row.error) : undefined,
+      sessionId: row.session_id ? String(row.session_id) : (row.sessionId ? String(row.sessionId) : undefined),
+      messageId: row.message_id ? String(row.message_id) : (row.messageId ? String(row.messageId) : undefined),
+      agent: row.agent ? String(row.agent) : undefined,
     };
   }
 
@@ -622,6 +673,13 @@ export class WorkflowStorage {
       startedAt: new Date(serialized.startedAt),
       completedAt: serialized.completedAt ? new Date(serialized.completedAt) : undefined,
       error: serialized.error,
+      context: (serialized.sessionId || serialized.messageId || serialized.agent)
+        ? {
+            sessionId: serialized.sessionId,
+            messageId: serialized.messageId,
+            agent: serialized.agent,
+          } satisfies RunContext
+        : undefined,
     };
   }
 

@@ -495,6 +495,8 @@ export interface WorkflowRun {
   startedAt: Date;
   completedAt?: Date;
   error?: string;
+  /** Session metadata for routing progress updates */
+  context?: RunContext;
 }
 
 /** Context passed during step execution */
@@ -778,4 +780,11 @@ export interface WorkflowRegistry {
   listWorkflows(): WorkflowDefinition[];
   getRun(runId: string): WorkflowRun | undefined;
   listRuns(workflowId?: string): WorkflowRun[];
+}
+
+/** Session context captured when a workflow is triggered */
+export interface RunContext {
+  sessionId?: string;
+  messageId?: string;
+  agent?: string;
 }
