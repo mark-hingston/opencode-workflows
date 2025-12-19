@@ -1,4 +1,4 @@
-# opencode-workflows **Deprecated** - use [https://github.com/mhingston/keystone-cli](keystone) instead
+# opencode-workflows **Deprecated** - use [keystone](https://github.com/mhingston/keystone-cli) instead
 
 Workflow automation plugin for OpenCode using the Mastra workflow engine. Define deterministic, multi-step processes that agents can trigger to perform complex tasks reliably.
 
